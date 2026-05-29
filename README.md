@@ -29,14 +29,14 @@ Optional:
 ## Database migration (Supabase Postgres)
 
 Run SQL from:
-- `/tmp/workspace/AntonTat27/ChatVault/migrations/001_init.sql`
+- `migrations/001_init.sql`
 
 Use Supabase SQL Editor or psql against `DATABASE_URL`.
 
 ## Run locally
 
 ```bash
-cd /tmp/workspace/AntonTat27/ChatVault
+cd chatvault
 go mod tidy
 go test ./...
 go run ./cmd/chatvault
