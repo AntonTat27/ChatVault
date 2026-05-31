@@ -17,12 +17,17 @@ Required:
 
 Optional:
 - `GEMINI_MODEL` (default `gemini-3.5-flash`)
+- `GEMINI_SUMMARY_MODEL` (default `gemini-2.0-flash`)
 - `GEMINI_TRANSCRIBE_MODEL` (default `gemini-3.5-flash`)
 - `SUPABASE_STORAGE_BUCKET` (default `chatvault`)
 - `DAILY_SUMMARY_HOUR_UTC` (default `18`)
 - `DAILY_SUMMARY_MINUTE_UTC` (default `0`)
 - `HTTP_TIMEOUT_SECONDS` (default `30`)
 - `NOTION_VERSION` (default `2022-06-28`)
+
+Recommended for daily Telegram summaries on a free/test quota:
+- `GEMINI_SUMMARY_MODEL=gemini-2.0-flash`
+- keep `temperature` at `0.0`; the app now scales `max_output_tokens` from the number of messages, with a small floor and a hard cap
 
 ## Database migration (Supabase Postgres)
 

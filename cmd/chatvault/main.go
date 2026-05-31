@@ -34,7 +34,8 @@ func main() {
 	defer stop()
 
 	repo := storage.NewRepository(cfg.SupabaseURL, cfg.SupabaseSecretKey, cfg.HTTPTimeout)
-	geminiClient := ai.NewGeminiClient(cfg.GeminiAPIKey, cfg.GeminiModel, cfg.HTTPTimeout)
+	// Create Gemini client with separate models for classification and summarization.
+	geminiClient := ai.NewGeminiClient(cfg.GeminiAPIKey, cfg.GeminiClassificationModel, cfg.GeminiSummaryModel, cfg.HTTPTimeout)
 	transcriberClient := ai.NewGeminiTranscribeClient(cfg.GeminiAPIKey, cfg.GeminiTranscribeModel, cfg.HTTPTimeout)
 	storageClient := supabase.NewStorageClient(cfg.SupabaseURL, cfg.SupabaseSecretKey, cfg.SupabaseStorageBucket, cfg.HTTPTimeout)
 	notionClient := notion.NewClient(cfg.HTTPTimeout, cfg.NotionVersion)

@@ -14,17 +14,20 @@ const (
 
 // Config represents the application runtime configuration loaded from environment variables.
 type Config struct {
-	TelegramBotToken      string
-	GeminiAPIKey          string
-	GeminiModel           string
-	GeminiTranscribeModel string
-	SupabaseURL           string
-	SupabaseSecretKey     string
-	SupabaseStorageBucket string
-	NotionVersion         string
-	DailySummaryHourUTC   int
-	DailySummaryMinuteUTC int
-	HTTPTimeout           time.Duration
+	TelegramBotToken string
+	GeminiAPIKey     string
+	GeminiModel      string
+	// Optional: separate models for classification and summarization.
+	GeminiClassificationModel string
+	GeminiSummaryModel        string
+	GeminiTranscribeModel     string
+	SupabaseURL               string
+	SupabaseSecretKey         string
+	SupabaseStorageBucket     string
+	NotionVersion             string
+	DailySummaryHourUTC       int
+	DailySummaryMinuteUTC     int
+	HTTPTimeout               time.Duration
 }
 
 // Load builds Config from environment variables and applies defaults.
@@ -39,17 +42,19 @@ func Load() (Config, error) {
 	}
 
 	cfg := Config{
-		TelegramBotToken:      os.Getenv("TELEGRAM_BOT_TOKEN"),
-		GeminiAPIKey:          os.Getenv("GEMINI_API_KEY"),
-		GeminiModel:           getEnv("GEMINI_MODEL", "gemini-2.5-flash"),
-		GeminiTranscribeModel: getEnv("GEMINI_TRANSCRIBE_MODEL", "gemini-2.5-flash"),
-		SupabaseURL:           os.Getenv("SUPABASE_URL"),
-		SupabaseSecretKey:     os.Getenv("SUPABASE_SECRET_KEY"),
-		SupabaseStorageBucket: getEnv("SUPABASE_STORAGE_BUCKET", "chatvault"),
-		NotionVersion:         getEnv("NOTION_VERSION", "2022-06-28"),
-		DailySummaryHourUTC:   hour,
-		DailySummaryMinuteUTC: minute,
-		HTTPTimeout:           time.Duration(getEnvInt("HTTP_TIMEOUT_SECONDS", defaultHTTPTimeoutSec)) * time.Second,
+		TelegramBotToken:          os.Getenv("TELEGRAM_BOT_TOKEN"),
+		GeminiAPIKey:              os.Getenv("GEMINI_API_KEY"),
+		GeminiModel:               getEnv("GEMINI_MODEL", "gemma-4-26b-a4b-it"),
+		GeminiClassificationModel: getEnv("GEMINI_CLASSIFICATION_MODEL", getEnv("GEMINI_MODEL", "gemma-4-26b-a4b-it")),
+		GeminiSummaryModel:        getEnv("GEMINI_SUMMARY_MODEL", "gemini-2.0-flash"),
+		GeminiTranscribeModel:     getEnv("GEMINI_TRANSCRIBE_MODEL", "gemini-2.5-flash"),
+		SupabaseURL:               os.Getenv("SUPABASE_URL"),
+		SupabaseSecretKey:         os.Getenv("SUPABASE_SECRET_KEY"),
+		SupabaseStorageBucket:     getEnv("SUPABASE_STORAGE_BUCKET", "chatvault"),
+		NotionVersion:             getEnv("NOTION_VERSION", "2022-06-28"),
+		DailySummaryHourUTC:       hour,
+		DailySummaryMinuteUTC:     minute,
+		HTTPTimeout:               time.Duration(getEnvInt("HTTP_TIMEOUT_SECONDS", defaultHTTPTimeoutSec)) * time.Second,
 	}
 
 	if cfg.TelegramBotToken == "" {

@@ -16,14 +16,17 @@ import (
 )
 
 const (
-	maxAITryCount      = 2
-	aiRetryDelay       = 5 * time.Second
-	geminiTemperature  = 0.0
-	geminiResponseJSON = "application/json"
-	geminiResponseText = "text/plain"
-	candidateCount     = 1
-	topP               = 0.9
-	topK               = 40
+	maxAITryCount           = 2
+	aiRetryDelay            = 5 * time.Second
+	geminiTemperature       = 0.0
+	geminiResponseJSON      = "application/json"
+	geminiResponseText      = "text/plain"
+	candidateCount          = 1
+	topP                    = 1.0
+	topK                    = 1
+	summaryMinOutputTokens  = 384
+	summaryTokensPerMessage = 8
+	summaryMaxOutputTokens  = 1536
 )
 
 const classificationPromptTemplate = `You are classifying a message from a professional team group chat.
@@ -48,11 +51,17 @@ const summaryPromptTemplate = `You are summarising a full day of messages from a
 Below are all messages from today, each with their type tag.
 
 Your output must be a structured JSON with these fields:
-- "summary": 1-2 sentence narrative overview of the day's discussion (<= 30 words)
-- "decisions": array of strings, each a clear decision (limit to top 3)
-- "action_items": array of objects with "task" and "owner" (limit to top 3)
-- "ideas": array of strings, each a notable idea (limit to top 3)
-- "open_questions": array of strings, each an unresolved question (limit to top 3)
+- "summary": narrative overview of the day's discussion (<= 120 words)
+- "decisions": array of strings, each a clear decision that was made
+- "action_items": array of objects with "task" and "owner" (owner is null if unassigned)
+- "ideas": array of strings, each a notable idea raised
+- "open_questions": array of strings, each an unresolved question
+
+Rules:
+- Prioritise the most important and recurring points from the day.
+- Merge duplicates and skip low-signal chatter, greetings, and reactions.
+- Keep tasks concrete and concise; do not list every message.
+- If a section has nothing meaningful, use an empty array.
 
 Messages:
 %s
@@ -63,11 +72,14 @@ Respond ONLY with the JSON object. No markdown, no preamble.`
 type GeminiClient struct {
 	httpClient *http.Client
 	apiKey     string
-	model      string
+	classModel string
+	sumModel   string
 }
 
-// NewGeminiClient constructs GeminiClient with request timeout.
-func NewGeminiClient(apiKey string, modelName string, timeout time.Duration) *GeminiClient {
+// NewGeminiClient constructs GeminiClient with request timeout. It accepts
+// separate model names for classification and summarization. If a single
+// model is desired, pass the same value for both parameters.
+func NewGeminiClient(apiKey string, classificationModel string, summaryModel string, timeout time.Duration) *GeminiClient {
 	// Use a transport wrapper that injects the x-goog-api-key header on every
 	// HTTP request as a fallback for callers that require the API key header.
 	// We still pass option.WithAPIKey to the SDK, but some environments require
@@ -78,7 +90,8 @@ func NewGeminiClient(apiKey string, modelName string, timeout time.Duration) *Ge
 	return &GeminiClient{
 		httpClient: httpClient,
 		apiKey:     apiKey,
-		model:      modelName,
+		classModel: classificationModel,
+		sumModel:   summaryModel,
 	}
 }
 
@@ -120,7 +133,7 @@ func (c *GeminiClient) ClassifyMessage(ctx context.Context, messageText string) 
 		},
 		Required: []string{"type"},
 	}
-	raw, err := c.sendPrompt(ctx, prompt, schema, 256)
+	raw, err := c.sendPrompt(ctx, prompt, schema, 256, c.classModel)
 	if err != nil {
 		return model.ClassificationResult{}, err
 	}
@@ -130,6 +143,7 @@ func (c *GeminiClient) ClassifyMessage(ctx context.Context, messageText string) 
 // GenerateSummary requests the daily summary JSON payload from Gemini.
 func (c *GeminiClient) GenerateSummary(ctx context.Context, messagesJSON string) (model.DailySummary, error) {
 	prompt := BuildSummaryPrompt(messagesJSON)
+	messageCount := countSummaryMessages(messagesJSON)
 	schema := &genai.Schema{
 		Type: genai.TypeObject,
 		Properties: map[string]*genai.Schema{
@@ -141,7 +155,7 @@ func (c *GeminiClient) GenerateSummary(ctx context.Context, messagesJSON string)
 		},
 		Required: []string{"summary"},
 	}
-	raw, err := c.sendPrompt(ctx, prompt, schema, 512)
+	raw, err := c.sendPrompt(ctx, prompt, schema, summaryOutputTokensForMessageCount(messageCount), c.sumModel)
 	if err != nil {
 		return model.DailySummary{}, err
 	}
@@ -182,17 +196,17 @@ func ParseClassificationResult(raw string) (model.ClassificationResult, error) {
 }
 
 // sendPrompt executes a Gemini request with retry/backoff policy.
-func (c *GeminiClient) sendPrompt(ctx context.Context, prompt string, schema *genai.Schema, maxTokens int32) (string, error) {
+func (c *GeminiClient) sendPrompt(ctx context.Context, prompt string, schema *genai.Schema, maxTokens int32, model string) (string, error) {
 	if c.apiKey == "" {
 		return "", fmt.Errorf("gemini api key is not configured")
 	}
-	if c.model == "" {
+	if model == "" {
 		return "", fmt.Errorf("gemini model is not configured")
 	}
 
 	var lastErr error
 	for attempt := 1; attempt <= maxAITryCount; attempt++ {
-		result, reqErr := c.doGenerate(ctx, prompt, schema, maxTokens)
+		result, reqErr := c.doGenerate(ctx, prompt, schema, maxTokens, model)
 		if reqErr == nil {
 			return result, nil
 		}
@@ -212,8 +226,9 @@ func (c *GeminiClient) sendPrompt(ctx context.Context, prompt string, schema *ge
 	return "", fmt.Errorf("gemini request failed after retry: %w", lastErr)
 }
 
-func (c *GeminiClient) doGenerate(ctx context.Context, prompt string, schema *genai.Schema, maxTokens int32) (string, error) {
-	if c.model == "" {
+// doGenerate executes a Gemini request.
+func (c *GeminiClient) doGenerate(ctx context.Context, prompt string, schema *genai.Schema, maxTokens int32, model string) (string, error) {
+	if model == "" {
 		return "", fmt.Errorf("gemini model is not configured")
 	}
 	// Create a fresh SDK client for every request so each prompt is fully isolated.
@@ -223,9 +238,9 @@ func (c *GeminiClient) doGenerate(ctx context.Context, prompt string, schema *ge
 	if err != nil {
 		return "", err
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
-	generativeModel := client.GenerativeModel(c.model)
+	generativeModel := client.GenerativeModel(model)
 	// Use deterministic, low-cost settings to avoid repetition/degeneration and
 	// keep token usage low. These defaults can be tuned later.
 	generativeModel.SetMaxOutputTokens(maxTokens)
@@ -288,7 +303,26 @@ func (c *GeminiClient) doGenerate(ctx context.Context, prompt string, schema *ge
 
 func buildStrictPrompt(base string) string {
 	return base + "\n\nReturn only valid JSON that matches the response schema. " +
-		"Do not add commentary or repeated text. If unsure, use empty arrays and a short summary (<= 40 words)."
+		"Do not add commentary or repeated text. If unsure, use empty arrays, at most 3 decisions, at most 5 action items, at most 3 ideas, at most 3 open questions, and a short summary (<= 40 words)."
+}
+
+func summaryOutputTokensForMessageCount(messageCount int) int32 {
+	if messageCount < 1 {
+		messageCount = 1
+	}
+	tokens := summaryMinOutputTokens + (messageCount * summaryTokensPerMessage)
+	if tokens > summaryMaxOutputTokens {
+		tokens = summaryMaxOutputTokens
+	}
+	return int32(tokens)
+}
+
+func countSummaryMessages(messagesJSON string) int {
+	var payload []json.RawMessage
+	if err := json.Unmarshal([]byte(messagesJSON), &payload); err != nil || len(payload) == 0 {
+		return 1
+	}
+	return len(payload)
 }
 
 func extractJSONCandidate(raw string) (string, bool) {

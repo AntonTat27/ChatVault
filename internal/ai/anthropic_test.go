@@ -25,9 +25,36 @@ func TestBuildSummaryPrompt(t *testing.T) {
 	prompt := BuildSummaryPrompt(messagesJSON)
 	if !containsAll(prompt,
 		"You are summarising a full day of messages from a professional team group chat.",
+		"\"summary\": narrative overview of the day's discussion (<= 120 words)",
+		"\"decisions\": array of strings, each a clear decision that was made",
+		"\"action_items\": array of objects with \"task\" and \"owner\"",
+		"Prioritise the most important and recurring points from the day.",
 		"Messages:\n"+messagesJSON,
 		"Respond ONLY with the JSON object. No markdown, no preamble.") {
 		t.Fatalf("summary prompt missing required sections: %s", prompt)
+	}
+}
+
+// TestSummaryOutputTokensForMessageCount verifies the dynamic output budget scales with chat size.
+func TestSummaryOutputTokensForMessageCount(t *testing.T) {
+	if got := summaryOutputTokensForMessageCount(1); got != 392 {
+		t.Fatalf("unexpected token budget for one message: %d", got)
+	}
+	if got := summaryOutputTokensForMessageCount(100); got != 1184 {
+		t.Fatalf("unexpected token budget for 100 messages: %d", got)
+	}
+	if got := summaryOutputTokensForMessageCount(400); got != summaryMaxOutputTokens {
+		t.Fatalf("expected token budget to cap at %d, got %d", summaryMaxOutputTokens, got)
+	}
+}
+
+// TestCountSummaryMessages verifies the message counter reads JSON arrays and falls back safely.
+func TestCountSummaryMessages(t *testing.T) {
+	if got := countSummaryMessages(`[{"text":"a"},{"text":"b"}]`); got != 2 {
+		t.Fatalf("unexpected count for array payload: %d", got)
+	}
+	if got := countSummaryMessages(`not-json`); got != 1 {
+		t.Fatalf("unexpected fallback count: %d", got)
 	}
 }
 

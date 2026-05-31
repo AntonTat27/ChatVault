@@ -147,6 +147,7 @@ func (r *Repository) ListMessagesForDate(ctx context.Context, chatID int64, day 
 
 // SaveSummary persists a generated summary payload.
 func (r *Repository) SaveSummary(ctx context.Context, summary model.DailySummary) error {
+	summary = normalizeDailySummary(summary)
 	payload := map[string]any{
 		"chat_id":          summary.ChatID,
 		"summary_date_utc": summary.SummaryDateUTC,
@@ -162,6 +163,23 @@ func (r *Repository) SaveSummary(ctx context.Context, summary model.DailySummary
 	}
 	_, _, err := r.doRequest(ctx, http.MethodPost, tableSummaries, query, payload, "resolution=merge-duplicates")
 	return err
+}
+
+// normalizeDailySummary ensures nil slice fields are encoded as empty JSON arrays, not null.
+func normalizeDailySummary(summary model.DailySummary) model.DailySummary {
+	if summary.Decisions == nil {
+		summary.Decisions = []string{}
+	}
+	if summary.ActionItems == nil {
+		summary.ActionItems = []model.ActionItem{}
+	}
+	if summary.Ideas == nil {
+		summary.Ideas = []string{}
+	}
+	if summary.OpenQuestions == nil {
+		summary.OpenQuestions = []string{}
+	}
+	return summary
 }
 
 // GetSummary loads a daily summary by chat and date.
