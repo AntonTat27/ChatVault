@@ -1,3 +1,6 @@
+//go:build ignore
+// +build ignore
+
 package ai
 
 import (
@@ -7,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -14,11 +18,13 @@ import (
 )
 
 const (
-	anthropicURL           = "https://api.anthropic.com/v1/messages"
-	maxAITryCount          = 2
-	aiRetryDelay           = 5 * time.Second
-	anthropicVersionHeader = "2023-06-01"
-	anthropicMaxTokens     = 512
+	geminiBaseURL      = "https://generativelanguage.googleapis.com/v1beta/models/"
+	maxAITryCount      = 2
+	aiRetryDelay       = 5 * time.Second
+	geminiMaxTokens    = 512
+	geminiTemperature  = 0.2
+	geminiResponseJSON = "application/json"
+	geminiResponseText = "text/plain"
 )
 
 const classificationPromptTemplate = `You are classifying a message from a professional team group chat.
@@ -54,16 +60,16 @@ Messages:
 
 Respond ONLY with the JSON object. No markdown, no preamble.`
 
-// AnthropicClient performs AI classification and summary requests.
-type AnthropicClient struct {
+// GeminiClient performs AI classification and summary requests.
+type GeminiClient struct {
 	httpClient *http.Client
 	apiKey     string
 	model      string
 }
 
-// NewAnthropicClient constructs AnthropicClient with request timeout.
-func NewAnthropicClient(apiKey string, modelName string, timeout time.Duration) *AnthropicClient {
-	return &AnthropicClient{
+// NewGeminiClient constructs GeminiClient with request timeout.
+func NewGeminiClient(apiKey string, modelName string, timeout time.Duration) *GeminiClient {
+	return &GeminiClient{
 		httpClient: &http.Client{Timeout: timeout},
 		apiKey:     apiKey,
 		model:      modelName,
@@ -81,8 +87,8 @@ func BuildSummaryPrompt(messagesJSON string) string {
 	return fmt.Sprintf(summaryPromptTemplate, messagesJSON)
 }
 
-// ClassifyMessage tags a message using Anthropic and parses strict JSON output.
-func (c *AnthropicClient) ClassifyMessage(ctx context.Context, messageText string) (model.ClassificationResult, error) {
+// ClassifyMessage tags a message using Gemini and parses strict JSON output.
+func (c *GeminiClient) ClassifyMessage(ctx context.Context, messageText string) (model.ClassificationResult, error) {
 	prompt := BuildClassificationPrompt(messageText)
 	raw, err := c.sendPrompt(ctx, prompt)
 	if err != nil {
@@ -91,8 +97,8 @@ func (c *AnthropicClient) ClassifyMessage(ctx context.Context, messageText strin
 	return ParseClassificationResult(raw)
 }
 
-// GenerateSummary requests the daily summary JSON payload from Anthropic.
-func (c *AnthropicClient) GenerateSummary(ctx context.Context, messagesJSON string) (model.DailySummary, error) {
+// GenerateSummary requests the daily summary JSON payload from Gemini.
+func (c *GeminiClient) GenerateSummary(ctx context.Context, messagesJSON string) (model.DailySummary, error) {
 	prompt := BuildSummaryPrompt(messagesJSON)
 	raw, err := c.sendPrompt(ctx, prompt)
 	if err != nil {
@@ -134,27 +140,33 @@ func ParseClassificationResult(raw string) (model.ClassificationResult, error) {
 	return result, nil
 }
 
-// sendPrompt executes an Anthropic request with retry/backoff policy.
-func (c *AnthropicClient) sendPrompt(ctx context.Context, prompt string) (string, error) {
+// sendPrompt executes a Gemini request with retry/backoff policy.
+func (c *GeminiClient) sendPrompt(ctx context.Context, prompt string) (string, error) {
 	if c.apiKey == "" {
-		return "", fmt.Errorf("anthropic api key is not configured")
+		return "", fmt.Errorf("gemini api key is not configured")
 	}
 
-	requestBody := map[string]any{
-		"model":      c.model,
-		"max_tokens": anthropicMaxTokens,
-		"messages": []map[string]string{
-			{"role": "user", "content": prompt},
+	request := geminiRequest{
+		Contents: []geminiContent{
+			{
+				Role:  "user",
+				Parts: []geminiPart{{Text: prompt}},
+			},
+		},
+		GenerationConfig: geminiGenerationConfig{
+			MaxOutputTokens:  geminiMaxTokens,
+			Temperature:      geminiTemperature,
+			ResponseMimeType: geminiResponseJSON,
 		},
 	}
-	body, err := json.Marshal(requestBody)
+	body, err := json.Marshal(request)
 	if err != nil {
 		return "", err
 	}
 
 	var lastErr error
 	for attempt := 1; attempt <= maxAITryCount; attempt++ {
-		result, reqErr := c.doRequest(ctx, body)
+		result, reqErr := doGeminiRequest(ctx, c.httpClient, c.apiKey, c.model, body)
 		if reqErr == nil {
 			return result, nil
 		}
@@ -167,20 +179,57 @@ func (c *AnthropicClient) sendPrompt(ctx context.Context, prompt string) (string
 			}
 		}
 	}
-	return "", fmt.Errorf("anthropic request failed after retry: %w", lastErr)
+	return "", fmt.Errorf("gemini request failed after retry: %w", lastErr)
 }
 
-// doRequest executes one HTTP request to Anthropic.
-func (c *AnthropicClient) doRequest(ctx context.Context, body []byte) (string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, anthropicURL, bytes.NewReader(body))
+type geminiRequest struct {
+	Contents         []geminiContent        `json:"contents"`
+	GenerationConfig geminiGenerationConfig `json:"generationConfig,omitempty"`
+}
+
+type geminiContent struct {
+	Role  string       `json:"role,omitempty"`
+	Parts []geminiPart `json:"parts"`
+}
+
+type geminiPart struct {
+	Text       string            `json:"text,omitempty"`
+	InlineData *geminiInlineData `json:"inlineData,omitempty"`
+}
+
+type geminiInlineData struct {
+	MimeType string `json:"mimeType"`
+	Data     string `json:"data"`
+}
+
+type geminiGenerationConfig struct {
+	MaxOutputTokens  int     `json:"maxOutputTokens,omitempty"`
+	Temperature      float32 `json:"temperature,omitempty"`
+	ResponseMimeType string  `json:"responseMimeType,omitempty"`
+}
+
+type geminiResponse struct {
+	Candidates []struct {
+		Content struct {
+			Parts []struct {
+				Text string `json:"text"`
+			} `json:"parts"`
+		} `json:"content"`
+	} `json:"candidates"`
+}
+
+func doGeminiRequest(ctx context.Context, httpClient *http.Client, apiKey string, model string, body []byte) (string, error) {
+	requestURL, err := buildGeminiURL(model, apiKey)
+	if err != nil {
+		return "", err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, requestURL, bytes.NewReader(body))
 	if err != nil {
 		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-api-key", c.apiKey)
-	req.Header.Set("anthropic-version", anthropicVersionHeader)
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -192,23 +241,42 @@ func (c *AnthropicClient) doRequest(ctx context.Context, body []byte) (string, e
 	}
 
 	if resp.StatusCode >= http.StatusBadRequest {
-		return "", fmt.Errorf("anthropic status %d", resp.StatusCode)
+		return "", fmt.Errorf("gemini status %d: %s", resp.StatusCode, strings.TrimSpace(string(payload)))
 	}
 
-	type contentBlock struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
-	}
-	type anthropicResponse struct {
-		Content []contentBlock `json:"content"`
-	}
-
-	var response anthropicResponse
+	var response geminiResponse
 	if err := json.Unmarshal(payload, &response); err != nil {
-		return "", fmt.Errorf("anthropic decode failed: %w", err)
+		return "", fmt.Errorf("gemini decode failed: %w", err)
 	}
-	if len(response.Content) == 0 {
-		return "", fmt.Errorf("anthropic response had no content")
+	if len(response.Candidates) == 0 {
+		return "", fmt.Errorf("gemini response had no candidates")
 	}
-	return strings.TrimSpace(response.Content[0].Text), nil
+	var builder strings.Builder
+	for _, part := range response.Candidates[0].Content.Parts {
+		builder.WriteString(part.Text)
+	}
+	text := strings.TrimSpace(builder.String())
+	if text == "" {
+		return "", fmt.Errorf("gemini response had empty text")
+	}
+	return text, nil
+}
+
+func buildGeminiURL(model string, apiKey string) (string, error) {
+	if model == "" {
+		return "", fmt.Errorf("gemini model is not configured")
+	}
+	if apiKey == "" {
+		return "", fmt.Errorf("gemini api key is not configured")
+	}
+	escapedModel := url.PathEscape(model)
+	endpoint := fmt.Sprintf("%s%s:generateContent", geminiBaseURL, escapedModel)
+	parsed, err := url.Parse(endpoint)
+	if err != nil {
+		return "", err
+	}
+	query := parsed.Query()
+	query.Set("key", apiKey)
+	parsed.RawQuery = query.Encode()
+	return parsed.String(), nil
 }

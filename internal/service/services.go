@@ -30,8 +30,8 @@ type PostMessageFn func(ctx context.Context, chatID int64, text string) error
 // Services coordinates storage, AI processing, summary generation, and integrations.
 type Services struct {
 	repo          *storage.Repository
-	anthropic     *ai.AnthropicClient
-	whisper       *ai.WhisperClient
+	gemini        *ai.GeminiClient
+	transcriber   *ai.GeminiTranscribeClient
 	storageClient *supabase.StorageClient
 	notionClient  *notion.Client
 	summaryHour   int
@@ -44,8 +44,8 @@ type Services struct {
 func NewServices(
 	ctx context.Context,
 	repo *storage.Repository,
-	anthropicClient *ai.AnthropicClient,
-	whisperClient *ai.WhisperClient,
+	geminiClient *ai.GeminiClient,
+	transcriberClient *ai.GeminiTranscribeClient,
 	storageClient *supabase.StorageClient,
 	notionClient *notion.Client,
 	summaryHour int,
@@ -53,8 +53,8 @@ func NewServices(
 ) *Services {
 	s := &Services{
 		repo:          repo,
-		anthropic:     anthropicClient,
-		whisper:       whisperClient,
+		gemini:        geminiClient,
+		transcriber:   transcriberClient,
 		storageClient: storageClient,
 		notionClient:  notionClient,
 		summaryHour:   summaryHour,
@@ -86,7 +86,7 @@ func (s *Services) HandleIncomingMessage(ctx context.Context, message model.Mess
 		if message.Transcript != "" {
 			textForTag = message.Transcript
 		}
-		result, err := s.anthropic.ClassifyMessage(jobCtx, textForTag)
+		result, err := s.gemini.ClassifyMessage(jobCtx, textForTag)
 		if err != nil {
 			logProcessingError(message.ChatID, message.MessageID, "classification", err)
 			return
@@ -105,13 +105,13 @@ func (s *Services) ProcessVoiceMessage(ctx context.Context, message model.Messag
 		return fmt.Errorf("storage upload failed: %w", err)
 	}
 
-	transcript, err := s.whisper.Transcribe(ctx, fmt.Sprintf("%d_%d.ogg", message.ChatID, message.MessageID), voiceBytes)
+	transcript, err := s.transcriber.Transcribe(ctx, fmt.Sprintf("%d_%d.ogg", message.ChatID, message.MessageID), voiceBytes)
 	if err != nil {
 		logProcessingError(message.ChatID, message.MessageID, "transcription", err)
 		transcript = model.VoiceTranscriptFallback
 	}
 
-	classification, classifyErr := s.anthropic.ClassifyMessage(ctx, transcript)
+	classification, classifyErr := s.gemini.ClassifyMessage(ctx, transcript)
 	if classifyErr != nil {
 		logProcessingError(message.ChatID, message.MessageID, "voice_classification", classifyErr)
 		classification = model.ClassificationResult{Type: model.TagDocument}
@@ -134,7 +134,7 @@ func (s *Services) GenerateSummaryForChat(ctx context.Context, chatID int64, dat
 		return err
 	}
 
-	summary, err := s.anthropic.GenerateSummary(ctx, messagesPayload)
+	summary, err := s.gemini.GenerateSummary(ctx, messagesPayload)
 	if err != nil {
 		return err
 	}

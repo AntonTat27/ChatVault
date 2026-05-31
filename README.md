@@ -3,23 +3,21 @@
 Telegram group knowledge-base bot with AI-first features:
 - auto-store group messages
 - async AI tagging (`idea`, `decision`, `action-item`, `question`, `document`, `noise`) + optional topic
-- voice transcription pipeline (Telegram `.ogg` -> Supabase Storage -> Whisper -> transcript + tagging)
-- daily summaries with Anthropic and Telegram posting
+- voice transcription pipeline (Telegram `.ogg` -> Supabase Storage -> Gemini -> transcript + tagging)
+- daily summaries with Gemini and Telegram posting
 - commands: `/summary`, `/ideas`, `/decisions`, `/actions`, `/notion`, `/export`
 
 ## Environment variables
 
 Required:
 - `TELEGRAM_BOT_TOKEN`
-- `DATABASE_URL`
-- `ANTHROPIC_API_KEY`
-- `OPENAI_API_KEY`
+- `GEMINI_API_KEY`
 - `SUPABASE_URL`
-- `SUPABASE_SERVICE_ROLE_KEY`
+- `SUPABASE_SECRET_KEY`
 
 Optional:
-- `ANTHROPIC_MODEL` (default `claude-3-5-haiku-latest`)
-- `OPENAI_WHISPER_MODEL` (default `whisper-1`)
+- `GEMINI_MODEL` (default `gemini-3.5-flash`)
+- `GEMINI_TRANSCRIBE_MODEL` (default `gemini-3.5-flash`)
 - `SUPABASE_STORAGE_BUCKET` (default `chatvault`)
 - `DAILY_SUMMARY_HOUR_UTC` (default `18`)
 - `DAILY_SUMMARY_MINUTE_UTC` (default `0`)
@@ -31,7 +29,7 @@ Optional:
 Run SQL from:
 - `migrations/001_init.sql`
 
-Use Supabase SQL Editor or psql against `DATABASE_URL`.
+Use Supabase SQL Editor or psql against the Supabase project database.
 
 ## Run locally
 
@@ -73,7 +71,7 @@ When configured, daily summary export creates a page:
 1. Create a new Railway service from this repository.
 2. Add all required environment variables.
 3. Set start command to `/chatvault` when using Docker deployment.
-4. Ensure outbound network access to Telegram, Anthropic, OpenAI, Supabase, Notion.
+4. Ensure outbound network access to Telegram, Gemini, Supabase, Notion.
 
 ### Fly.io
 1. `fly launch --no-deploy` in repository root.

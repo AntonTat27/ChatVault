@@ -69,6 +69,52 @@ func (h *Handler) DefaultHandler(ctx context.Context, b *bot.Bot, update *models
 		return
 	}
 
+	// Handle chat events: new members, member left, title changes, pinned messages
+	if len(update.Message.NewChatMembers) > 0 {
+		for _, m := range update.Message.NewChatMembers {
+			display := displayName(m.FirstName, m.LastName, m.Username)
+			entry := model.Message{
+				ChatID:    update.Message.Chat.ID,
+				MessageID: update.Message.ID,
+				SenderID:  m.ID,
+				ChatTitle: update.Message.Chat.Title,
+				Text:      fmt.Sprintf("member_joined: %s", display),
+			}
+			// store event message (async classification will run)
+			_ = h.services.HandleIncomingMessage(ctx, entry)
+			// welcome message
+			h.replyText(ctx, b, update, fmt.Sprintf("Welcome %s!", display))
+		}
+		return
+	}
+	if update.Message.LeftChatMember != nil {
+		m := update.Message.LeftChatMember
+		display := displayName(m.FirstName, m.LastName, m.Username)
+		entry := model.Message{
+			ChatID:    update.Message.Chat.ID,
+			MessageID: update.Message.ID,
+			SenderID:  m.ID,
+			ChatTitle: update.Message.Chat.Title,
+			Text:      fmt.Sprintf("member_left: %s", display),
+		}
+		_ = h.services.HandleIncomingMessage(ctx, entry)
+		h.replyText(ctx, b, update, fmt.Sprintf("%s left the chat.", display))
+		return
+	}
+	if update.Message.NewChatTitle != "" {
+		title := update.Message.NewChatTitle
+		entry := model.Message{
+			ChatID:    update.Message.Chat.ID,
+			MessageID: update.Message.ID,
+			SenderID:  update.Message.From.ID,
+			ChatTitle: title,
+			Text:      fmt.Sprintf("chat_title_changed: %s", title),
+		}
+		_ = h.services.HandleIncomingMessage(ctx, entry)
+		h.replyText(ctx, b, update, fmt.Sprintf("Chat title updated to: %s", title))
+		return
+	}
+
 	text := update.Message.Text
 	if text == "" {
 		text = update.Message.Caption
@@ -267,4 +313,15 @@ func (h *Handler) replyText(ctx context.Context, b *bot.Bot, update *models.Upda
 		ChatID: update.Message.Chat.ID,
 		Text:   text,
 	})
+}
+
+// displayName returns a readable name for a user.
+func displayName(first, last, username string) string {
+	if username != "" {
+		return "@" + username
+	}
+	if last != "" {
+		return strings.TrimSpace(first + " " + last)
+	}
+	return strings.TrimSpace(first)
 }

@@ -9,19 +9,17 @@ import (
 
 const (
 	defaultSummaryHourUTC = 18
-	defaultHTTPTimeoutSec = 30
+	defaultHTTPTimeoutSec = 120
 )
 
 // Config represents the application runtime configuration loaded from environment variables.
 type Config struct {
 	TelegramBotToken      string
-	DatabaseURL           string
-	AnthropicAPIKey       string
-	AnthropicModel        string
-	OpenAIAPIKey          string
-	OpenAIWhisperModel    string
+	GeminiAPIKey          string
+	GeminiModel           string
+	GeminiTranscribeModel string
 	SupabaseURL           string
-	SupabaseServiceRole   string
+	SupabaseSecretKey     string
 	SupabaseStorageBucket string
 	NotionVersion         string
 	DailySummaryHourUTC   int
@@ -42,13 +40,11 @@ func Load() (Config, error) {
 
 	cfg := Config{
 		TelegramBotToken:      os.Getenv("TELEGRAM_BOT_TOKEN"),
-		DatabaseURL:           os.Getenv("DATABASE_URL"),
-		AnthropicAPIKey:       os.Getenv("ANTHROPIC_API_KEY"),
-		AnthropicModel:        getEnv("ANTHROPIC_MODEL", "claude-3-5-haiku-latest"),
-		OpenAIAPIKey:          os.Getenv("OPENAI_API_KEY"),
-		OpenAIWhisperModel:    getEnv("OPENAI_WHISPER_MODEL", "whisper-1"),
+		GeminiAPIKey:          os.Getenv("GEMINI_API_KEY"),
+		GeminiModel:           getEnv("GEMINI_MODEL", "gemini-2.5-flash"),
+		GeminiTranscribeModel: getEnv("GEMINI_TRANSCRIBE_MODEL", "gemini-2.5-flash"),
 		SupabaseURL:           os.Getenv("SUPABASE_URL"),
-		SupabaseServiceRole:   os.Getenv("SUPABASE_SERVICE_ROLE_KEY"),
+		SupabaseSecretKey:     os.Getenv("SUPABASE_SECRET_KEY"),
 		SupabaseStorageBucket: getEnv("SUPABASE_STORAGE_BUCKET", "chatvault"),
 		NotionVersion:         getEnv("NOTION_VERSION", "2022-06-28"),
 		DailySummaryHourUTC:   hour,
@@ -59,8 +55,11 @@ func Load() (Config, error) {
 	if cfg.TelegramBotToken == "" {
 		return Config{}, fmt.Errorf("TELEGRAM_BOT_TOKEN is required")
 	}
-	if cfg.DatabaseURL == "" {
-		return Config{}, fmt.Errorf("DATABASE_URL is required")
+	if cfg.SupabaseURL == "" {
+		return Config{}, fmt.Errorf("SUPABASE_URL is required")
+	}
+	if cfg.SupabaseSecretKey == "" {
+		return Config{}, fmt.Errorf("SUPABASE_SECRET_KEY is required")
 	}
 
 	return cfg, nil

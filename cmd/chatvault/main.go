@@ -2,14 +2,12 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"log"
 	"os"
 	"os/signal"
 	"syscall"
 
 	telegrambot "github.com/go-telegram/bot"
-	_ "github.com/lib/pq"
 
 	"chatvault/internal/ai"
 	bothandler "chatvault/internal/bot"
@@ -18,37 +16,30 @@ import (
 	"chatvault/internal/service"
 	"chatvault/internal/storage"
 	"chatvault/internal/supabase"
+
+	"github.com/joho/godotenv"
 )
 
 // main initializes dependencies and starts the Telegram bot.
 func main() {
 	log.SetFlags(log.LstdFlags | log.LUTC)
 
+	_ = godotenv.Load()
 	cfg, err := config.Load()
 	if err != nil {
 		log.Fatalf("config load failed: %v", err)
 	}
 
-	db, err := sql.Open("postgres", cfg.DatabaseURL)
-	if err != nil {
-		log.Fatalf("database open failed: %v", err)
-	}
-	defer db.Close()
-
-	if err := db.Ping(); err != nil {
-		log.Fatalf("database ping failed: %v", err)
-	}
-
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	repo := storage.NewRepository(db)
-	anthropicClient := ai.NewAnthropicClient(cfg.AnthropicAPIKey, cfg.AnthropicModel, cfg.HTTPTimeout)
-	whisperClient := ai.NewWhisperClient(cfg.OpenAIAPIKey, cfg.OpenAIWhisperModel, cfg.HTTPTimeout)
-	storageClient := supabase.NewStorageClient(cfg.SupabaseURL, cfg.SupabaseServiceRole, cfg.SupabaseStorageBucket, cfg.HTTPTimeout)
+	repo := storage.NewRepository(cfg.SupabaseURL, cfg.SupabaseSecretKey, cfg.HTTPTimeout)
+	geminiClient := ai.NewGeminiClient(cfg.GeminiAPIKey, cfg.GeminiModel, cfg.HTTPTimeout)
+	transcriberClient := ai.NewGeminiTranscribeClient(cfg.GeminiAPIKey, cfg.GeminiTranscribeModel, cfg.HTTPTimeout)
+	storageClient := supabase.NewStorageClient(cfg.SupabaseURL, cfg.SupabaseSecretKey, cfg.SupabaseStorageBucket, cfg.HTTPTimeout)
 	notionClient := notion.NewClient(cfg.HTTPTimeout, cfg.NotionVersion)
 
-	services := service.NewServices(ctx, repo, anthropicClient, whisperClient, storageClient, notionClient, cfg.DailySummaryHourUTC, cfg.DailySummaryMinuteUTC)
+	services := service.NewServices(ctx, repo, geminiClient, transcriberClient, storageClient, notionClient, cfg.DailySummaryHourUTC, cfg.DailySummaryMinuteUTC)
 	defer services.Close()
 
 	handler := bothandler.NewHandler(services, cfg.TelegramBotToken)

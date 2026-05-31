@@ -1,10 +1,15 @@
 package storage
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"chatvault/internal/model"
@@ -17,254 +22,266 @@ const (
 	tableNotionConfig = "notion_configs"
 )
 
-// Repository provides data access methods for ChatVault.
+// Repository provides data access methods for ChatVault via Supabase PostgREST.
 type Repository struct {
-	db *sql.DB
+	baseURL    string
+	apiKey     string
+	httpClient *http.Client
 }
 
-// NewRepository creates a repository backed by sql.DB.
-func NewRepository(db *sql.DB) *Repository {
-	return &Repository{db: db}
+// NewRepository creates a repository backed by Supabase PostgREST.
+func NewRepository(supabaseURL string, apiKey string, timeout time.Duration) *Repository {
+	baseURL := strings.TrimRight(supabaseURL, "/") + "/rest/v1"
+	return &Repository{
+		baseURL:    baseURL,
+		apiKey:     apiKey,
+		httpClient: &http.Client{Timeout: timeout},
+	}
 }
 
 // UpsertChat ensures chat metadata and schedule configuration exist.
 func (r *Repository) UpsertChat(ctx context.Context, chatID int64, chatTitle string, hour int, minute int) error {
-	query := fmt.Sprintf(`
-INSERT INTO %s (chat_id, chat_title, summary_hour_utc, summary_minute_utc, is_active)
-VALUES ($1, $2, $3, $4, true)
-ON CONFLICT (chat_id) DO UPDATE SET
-chat_title = EXCLUDED.chat_title,
-is_active = true`, tableChats)
-	_, err := r.db.ExecContext(ctx, query, chatID, chatTitle, hour, minute)
+	payload := map[string]any{
+		"chat_id":            chatID,
+		"chat_title":         chatTitle,
+		"summary_hour_utc":   hour,
+		"summary_minute_utc": minute,
+		"is_active":          true,
+	}
+	_, _, err := r.doRequest(ctx, http.MethodPost, tableChats, url.Values{"on_conflict": []string{"chat_id"}}, payload, "resolution=merge-duplicates")
 	return err
 }
 
 // InsertMessage stores a Telegram message and returns the stored record ID.
 func (r *Repository) InsertMessage(ctx context.Context, msg model.Message) (int64, error) {
-	query := fmt.Sprintf(`
-INSERT INTO %s (chat_id, message_id, sender_id, chat_title, message_text, is_voice, transcript)
-VALUES ($1, $2, $3, $4, $5, $6, $7)
-ON CONFLICT (chat_id, message_id) DO UPDATE SET
-sender_id = EXCLUDED.sender_id,
-chat_title = EXCLUDED.chat_title,
-message_text = EXCLUDED.message_text,
-is_voice = EXCLUDED.is_voice,
-transcript = EXCLUDED.transcript
-RETURNING id`, tableMessages)
-
-	var id int64
-	err := r.db.QueryRowContext(ctx, query, msg.ChatID, msg.MessageID, msg.SenderID, msg.ChatTitle, msg.Text, msg.IsVoice, nullableString(msg.Transcript)).Scan(&id)
+	payload := map[string]any{
+		"chat_id":      msg.ChatID,
+		"message_id":   msg.MessageID,
+		"sender_id":    msg.SenderID,
+		"chat_title":   msg.ChatTitle,
+		"message_text": msg.Text,
+		"is_voice":     msg.IsVoice,
+		"transcript":   nullableString(msg.Transcript),
+	}
+	query := url.Values{
+		"on_conflict": []string{"chat_id,message_id"},
+		"select":      []string{"id"},
+	}
+	data, _, err := r.doRequest(ctx, http.MethodPost, tableMessages, query, payload, "resolution=merge-duplicates,return=representation")
 	if err != nil {
 		return 0, err
 	}
-	return id, nil
+	var rows []struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(data, &rows); err != nil {
+		return 0, err
+	}
+	if len(rows) == 0 {
+		return 0, sql.ErrNoRows
+	}
+	return rows[0].ID, nil
 }
 
 // UpdateClassification updates ai_tag and topic_tag for a message.
 func (r *Repository) UpdateClassification(ctx context.Context, chatID int64, messageID int, result model.ClassificationResult) error {
-	query := fmt.Sprintf(`UPDATE %s SET ai_tag = $1, topic_tag = $2, updated_at = now() WHERE chat_id = $3 AND message_id = $4`, tableMessages)
-	_, err := r.db.ExecContext(ctx, query, result.Type, nullablePtr(result.Topic), chatID, messageID)
+	payload := map[string]any{
+		"ai_tag":    result.Type,
+		"topic_tag": nullablePtr(result.Topic),
+	}
+	query := url.Values{
+		"chat_id":    []string{fmt.Sprintf("eq.%d", chatID)},
+		"message_id": []string{fmt.Sprintf("eq.%d", messageID)},
+	}
+	_, _, err := r.doRequest(ctx, http.MethodPatch, tableMessages, query, payload, "return=minimal")
 	return err
 }
 
 // SaveVoiceProcessing updates transcript and tags as a transaction.
 func (r *Repository) SaveVoiceProcessing(ctx context.Context, chatID int64, messageID int, transcript string, result model.ClassificationResult) error {
-	tx, err := r.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
+	payload := map[string]any{
+		"transcript": transcript,
+		"ai_tag":     result.Type,
+		"topic_tag":  nullablePtr(result.Topic),
 	}
-	defer func() {
-		if err != nil {
-			_ = tx.Rollback()
-		}
-	}()
-
-	queryTranscript := fmt.Sprintf(`UPDATE %s SET transcript = $1, updated_at = now() WHERE chat_id = $2 AND message_id = $3`, tableMessages)
-	if _, err = tx.ExecContext(ctx, queryTranscript, transcript, chatID, messageID); err != nil {
-		return err
+	query := url.Values{
+		"chat_id":    []string{fmt.Sprintf("eq.%d", chatID)},
+		"message_id": []string{fmt.Sprintf("eq.%d", messageID)},
 	}
-
-	queryTag := fmt.Sprintf(`UPDATE %s SET ai_tag = $1, topic_tag = $2, updated_at = now() WHERE chat_id = $3 AND message_id = $4`, tableMessages)
-	if _, err = tx.ExecContext(ctx, queryTag, result.Type, nullablePtr(result.Topic), chatID, messageID); err != nil {
-		return err
-	}
-
-	return tx.Commit()
+	_, _, err := r.doRequest(ctx, http.MethodPatch, tableMessages, query, payload, "return=minimal")
+	return err
 }
 
 // ListMessagesForDate returns messages for a UTC date for summary generation.
 func (r *Repository) ListMessagesForDate(ctx context.Context, chatID int64, day time.Time) ([]model.Message, error) {
 	start := time.Date(day.Year(), day.Month(), day.Day(), 0, 0, 0, 0, time.UTC)
 	end := start.Add(24 * time.Hour)
-	query := fmt.Sprintf(`
-SELECT id, chat_id, message_id, sender_id, chat_title,
-COALESCE(NULLIF(transcript, ''), message_text) AS effective_text,
-COALESCE(transcript, ''), COALESCE(ai_tag, ''), topic_tag,
-is_voice, created_at
-FROM %s
-WHERE chat_id = $1 AND created_at >= $2 AND created_at < $3
-ORDER BY created_at ASC`, tableMessages)
-
-	rows, err := r.db.QueryContext(ctx, query, chatID, start, end)
+	query := url.Values{
+		"chat_id":    []string{fmt.Sprintf("eq.%d", chatID)},
+		"created_at": []string{fmt.Sprintf("gte.%s", start.Format(time.RFC3339)), fmt.Sprintf("lt.%s", end.Format(time.RFC3339))},
+		"order":      []string{"created_at.asc"},
+		"select": []string{strings.Join([]string{
+			"id",
+			"chat_id",
+			"message_id",
+			"sender_id",
+			"chat_title",
+			"message_text",
+			"transcript",
+			"ai_tag",
+			"topic_tag",
+			"is_voice",
+			"created_at",
+		}, ",")},
+	}
+	data, _, err := r.doRequest(ctx, http.MethodGet, tableMessages, query, nil, "")
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	messages := make([]model.Message, 0)
-	for rows.Next() {
-		var m model.Message
-		var topic sql.NullString
-		if err := rows.Scan(&m.ID, &m.ChatID, &m.MessageID, &m.SenderID, &m.ChatTitle, &m.Text, &m.Transcript, &m.AIType, &topic, &m.IsVoice, &m.CreatedAt); err != nil {
-			return nil, err
-		}
-		if topic.Valid {
-			m.Topic = &topic.String
-		}
-		messages = append(messages, m)
+	var rows []messageRow
+	if err := json.Unmarshal(data, &rows); err != nil {
+		return nil, err
 	}
-	return messages, rows.Err()
+	return hydrateMessages(rows), nil
 }
 
 // SaveSummary persists a generated summary payload.
 func (r *Repository) SaveSummary(ctx context.Context, summary model.DailySummary) error {
-	decisions, err := json.Marshal(summary.Decisions)
-	if err != nil {
-		return err
+	payload := map[string]any{
+		"chat_id":          summary.ChatID,
+		"summary_date_utc": summary.SummaryDateUTC,
+		"summary_text":     summary.Summary,
+		"decisions":        summary.Decisions,
+		"action_items":     summary.ActionItems,
+		"ideas":            summary.Ideas,
+		"open_questions":   summary.OpenQuestions,
+		"message_count":    summary.MessageCount,
 	}
-	actions, err := json.Marshal(summary.ActionItems)
-	if err != nil {
-		return err
+	query := url.Values{
+		"on_conflict": []string{"chat_id,summary_date_utc"},
 	}
-	ideas, err := json.Marshal(summary.Ideas)
-	if err != nil {
-		return err
-	}
-	questions, err := json.Marshal(summary.OpenQuestions)
-	if err != nil {
-		return err
-	}
-
-	query := fmt.Sprintf(`
-INSERT INTO %s
-(chat_id, summary_date_utc, summary_text, decisions, action_items, ideas, open_questions, message_count)
-VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6::jsonb, $7::jsonb, $8)
-ON CONFLICT (chat_id, summary_date_utc) DO UPDATE SET
-summary_text = EXCLUDED.summary_text,
-decisions = EXCLUDED.decisions,
-action_items = EXCLUDED.action_items,
-ideas = EXCLUDED.ideas,
-open_questions = EXCLUDED.open_questions,
-message_count = EXCLUDED.message_count,
-created_at = now()`, tableSummaries)
-
-	_, err = r.db.ExecContext(ctx, query, summary.ChatID, summary.SummaryDateUTC, summary.Summary, decisions, actions, ideas, questions, summary.MessageCount)
+	_, _, err := r.doRequest(ctx, http.MethodPost, tableSummaries, query, payload, "resolution=merge-duplicates")
 	return err
 }
 
 // GetSummary loads a daily summary by chat and date.
 func (r *Repository) GetSummary(ctx context.Context, chatID int64, dateUTC string) (model.DailySummary, error) {
-	query := fmt.Sprintf(`SELECT summary_text, decisions, action_items, ideas, open_questions, message_count, created_at FROM %s WHERE chat_id = $1 AND summary_date_utc = $2`, tableSummaries)
-	var summary model.DailySummary
-	var decisionsRaw, actionsRaw, ideasRaw, questionsRaw []byte
-	err := r.db.QueryRowContext(ctx, query, chatID, dateUTC).Scan(&summary.Summary, &decisionsRaw, &actionsRaw, &ideasRaw, &questionsRaw, &summary.MessageCount, &summary.CreatedAt)
+	query := url.Values{
+		"chat_id":          []string{fmt.Sprintf("eq.%d", chatID)},
+		"summary_date_utc": []string{fmt.Sprintf("eq.%s", dateUTC)},
+		"select":           []string{"summary_text,decisions,action_items,ideas,open_questions,message_count,created_at"},
+	}
+	data, _, err := r.doRequest(ctx, http.MethodGet, tableSummaries, query, nil, "")
 	if err != nil {
-		return summary, err
+		return model.DailySummary{}, err
 	}
-	summary.ChatID = chatID
-	summary.SummaryDateUTC = dateUTC
-	if err := json.Unmarshal(decisionsRaw, &summary.Decisions); err != nil {
-		return summary, err
+	var rows []summaryRow
+	if err := json.Unmarshal(data, &rows); err != nil {
+		return model.DailySummary{}, err
 	}
-	if err := json.Unmarshal(actionsRaw, &summary.ActionItems); err != nil {
-		return summary, err
+	if len(rows) == 0 {
+		return model.DailySummary{}, sql.ErrNoRows
 	}
-	if err := json.Unmarshal(ideasRaw, &summary.Ideas); err != nil {
-		return summary, err
-	}
-	if err := json.Unmarshal(questionsRaw, &summary.OpenQuestions); err != nil {
-		return summary, err
-	}
-	return summary, nil
+	return rows[0].toSummary(chatID, dateUTC), nil
 }
 
 // ListMessagesByTagSince returns tagged messages for a time window.
 func (r *Repository) ListMessagesByTagSince(ctx context.Context, chatID int64, aiTag string, since time.Time) ([]model.Message, error) {
-	query := fmt.Sprintf(`
-SELECT id, chat_id, message_id, sender_id, chat_title,
-COALESCE(NULLIF(transcript, ''), message_text),
-COALESCE(transcript, ''), COALESCE(ai_tag, ''), topic_tag,
-is_voice, created_at
-FROM %s
-WHERE chat_id = $1 AND ai_tag = $2 AND created_at >= $3
-ORDER BY created_at DESC`, tableMessages)
-
-	rows, err := r.db.QueryContext(ctx, query, chatID, aiTag, since)
+	query := url.Values{
+		"chat_id":    []string{fmt.Sprintf("eq.%d", chatID)},
+		"ai_tag":     []string{fmt.Sprintf("eq.%s", aiTag)},
+		"created_at": []string{fmt.Sprintf("gte.%s", since.Format(time.RFC3339))},
+		"order":      []string{"created_at.desc"},
+		"select": []string{strings.Join([]string{
+			"id",
+			"chat_id",
+			"message_id",
+			"sender_id",
+			"chat_title",
+			"message_text",
+			"transcript",
+			"ai_tag",
+			"topic_tag",
+			"is_voice",
+			"created_at",
+		}, ",")},
+	}
+	data, _, err := r.doRequest(ctx, http.MethodGet, tableMessages, query, nil, "")
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	messages := make([]model.Message, 0)
-	for rows.Next() {
-		var m model.Message
-		var topic sql.NullString
-		if err := rows.Scan(&m.ID, &m.ChatID, &m.MessageID, &m.SenderID, &m.ChatTitle, &m.Text, &m.Transcript, &m.AIType, &topic, &m.IsVoice, &m.CreatedAt); err != nil {
-			return nil, err
-		}
-		if topic.Valid {
-			m.Topic = &topic.String
-		}
-		messages = append(messages, m)
+	var rows []messageRow
+	if err := json.Unmarshal(data, &rows); err != nil {
+		return nil, err
 	}
-	return messages, rows.Err()
+	return hydrateMessages(rows), nil
 }
 
 // ListActiveChatsForSchedule returns active chats due for summary at UTC hour/minute.
 func (r *Repository) ListActiveChatsForSchedule(ctx context.Context, hour int, minute int) ([]int64, error) {
-	query := fmt.Sprintf(`
-SELECT chat_id
-FROM %s
-WHERE is_active = true AND summary_hour_utc = $1 AND summary_minute_utc = $2`, tableChats)
-	rows, err := r.db.QueryContext(ctx, query, hour, minute)
+	query := url.Values{
+		"is_active":          []string{"eq.true"},
+		"summary_hour_utc":   []string{fmt.Sprintf("eq.%d", hour)},
+		"summary_minute_utc": []string{fmt.Sprintf("eq.%d", minute)},
+		"select":             []string{"chat_id"},
+	}
+	data, _, err := r.doRequest(ctx, http.MethodGet, tableChats, query, nil, "")
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	ids := make([]int64, 0)
-	for rows.Next() {
-		var chatID int64
-		if err := rows.Scan(&chatID); err != nil {
-			return nil, err
-		}
-		ids = append(ids, chatID)
+	var rows []struct {
+		ChatID int64 `json:"chat_id"`
 	}
-	return ids, rows.Err()
+	if err := json.Unmarshal(data, &rows); err != nil {
+		return nil, err
+	}
+	ids := make([]int64, 0, len(rows))
+	for _, row := range rows {
+		ids = append(ids, row.ChatID)
+	}
+	return ids, nil
 }
 
 // SaveNotionConfig stores per-chat Notion token and database ID.
 func (r *Repository) SaveNotionConfig(ctx context.Context, chatID int64, token string, databaseID string) error {
-	query := fmt.Sprintf(`
-INSERT INTO %s (chat_id, notion_token, notion_database_id)
-VALUES ($1, $2, $3)
-ON CONFLICT (chat_id) DO UPDATE SET
-notion_token = EXCLUDED.notion_token,
-notion_database_id = EXCLUDED.notion_database_id,
-updated_at = now()`, tableNotionConfig)
-	_, err := r.db.ExecContext(ctx, query, chatID, token, databaseID)
+	payload := map[string]any{
+		"chat_id":            chatID,
+		"notion_token":       token,
+		"notion_database_id": databaseID,
+		"updated_at":         time.Now().UTC().Format(time.RFC3339),
+	}
+	query := url.Values{"on_conflict": []string{"chat_id"}}
+	_, _, err := r.doRequest(ctx, http.MethodPost, tableNotionConfig, query, payload, "resolution=merge-duplicates")
 	return err
 }
 
 // GetNotionConfig retrieves Notion settings for a chat.
 func (r *Repository) GetNotionConfig(ctx context.Context, chatID int64) (model.NotionConfig, error) {
-	query := fmt.Sprintf(`SELECT notion_token, notion_database_id, updated_at FROM %s WHERE chat_id = $1`, tableNotionConfig)
-	var cfg model.NotionConfig
-	err := r.db.QueryRowContext(ctx, query, chatID).Scan(&cfg.Token, &cfg.DatabaseID, &cfg.UpdatedAt)
-	if err != nil {
-		return cfg, err
+	query := url.Values{
+		"chat_id": []string{fmt.Sprintf("eq.%d", chatID)},
+		"select":  []string{"notion_token,notion_database_id,updated_at"},
 	}
-	cfg.ChatID = chatID
+	data, _, err := r.doRequest(ctx, http.MethodGet, tableNotionConfig, query, nil, "")
+	if err != nil {
+		return model.NotionConfig{}, err
+	}
+	var rows []struct {
+		Token      string    `json:"notion_token"`
+		DatabaseID string    `json:"notion_database_id"`
+		UpdatedAt  time.Time `json:"updated_at"`
+	}
+	if err := json.Unmarshal(data, &rows); err != nil {
+		return model.NotionConfig{}, err
+	}
+	if len(rows) == 0 {
+		return model.NotionConfig{}, sql.ErrNoRows
+	}
+	cfg := model.NotionConfig{
+		ChatID:     chatID,
+		Token:      rows[0].Token,
+		DatabaseID: rows[0].DatabaseID,
+		UpdatedAt:  rows[0].UpdatedAt,
+	}
 	cfg.Configured = cfg.Token != "" && cfg.DatabaseID != ""
 	return cfg, nil
 }
@@ -283,4 +300,125 @@ func nullablePtr(value *string) interface{} {
 		return nil
 	}
 	return *value
+}
+
+type messageRow struct {
+	ID          int64     `json:"id"`
+	ChatID      int64     `json:"chat_id"`
+	MessageID   int       `json:"message_id"`
+	SenderID    int64     `json:"sender_id"`
+	ChatTitle   string    `json:"chat_title"`
+	MessageText string    `json:"message_text"`
+	Transcript  string    `json:"transcript"`
+	AIType      string    `json:"ai_tag"`
+	TopicTag    *string   `json:"topic_tag"`
+	IsVoice     bool      `json:"is_voice"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
+type summaryRow struct {
+	SummaryText   string             `json:"summary_text"`
+	Decisions     []string           `json:"decisions"`
+	ActionItems   []model.ActionItem `json:"action_items"`
+	Ideas         []string           `json:"ideas"`
+	OpenQuestions []string           `json:"open_questions"`
+	MessageCount  int                `json:"message_count"`
+	CreatedAt     time.Time          `json:"created_at"`
+}
+
+func (s summaryRow) toSummary(chatID int64, dateUTC string) model.DailySummary {
+	return model.DailySummary{
+		ChatID:         chatID,
+		SummaryDateUTC: dateUTC,
+		Summary:        s.SummaryText,
+		Decisions:      s.Decisions,
+		ActionItems:    s.ActionItems,
+		Ideas:          s.Ideas,
+		OpenQuestions:  s.OpenQuestions,
+		MessageCount:   s.MessageCount,
+		CreatedAt:      s.CreatedAt,
+	}
+}
+
+func hydrateMessages(rows []messageRow) []model.Message {
+	messages := make([]model.Message, 0, len(rows))
+	for _, row := range rows {
+		text := row.MessageText
+		if strings.TrimSpace(row.Transcript) != "" {
+			text = row.Transcript
+		}
+		messages = append(messages, model.Message{
+			ID:         row.ID,
+			ChatID:     row.ChatID,
+			MessageID:  row.MessageID,
+			SenderID:   row.SenderID,
+			ChatTitle:  row.ChatTitle,
+			Text:       text,
+			Transcript: row.Transcript,
+			AIType:     row.AIType,
+			Topic:      row.TopicTag,
+			IsVoice:    row.IsVoice,
+			CreatedAt:  row.CreatedAt,
+		})
+	}
+	return messages
+}
+
+func (r *Repository) doRequest(ctx context.Context, method string, path string, query url.Values, body any, prefer string) ([]byte, int, error) {
+	if r.baseURL == "" || r.apiKey == "" {
+		return nil, 0, fmt.Errorf("supabase api configuration is missing")
+	}
+	endpoint, err := r.buildURL(path, query)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	var reader io.Reader
+	if body != nil {
+		payload, err := json.Marshal(body)
+		if err != nil {
+			return nil, 0, err
+		}
+		reader = bytes.NewReader(payload)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, endpoint, reader)
+	if err != nil {
+		return nil, 0, err
+	}
+	req.Header.Set("apikey", r.apiKey)
+	req.Header.Set("Authorization", "Bearer "+r.apiKey)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if prefer != "" {
+		req.Header.Set("Prefer", prefer)
+	}
+
+	resp, err := r.httpClient.Do(req)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer resp.Body.Close()
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, resp.StatusCode, err
+	}
+	if resp.StatusCode >= http.StatusBadRequest {
+		return nil, resp.StatusCode, fmt.Errorf("supabase status %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
+	}
+	return data, resp.StatusCode, nil
+}
+
+func (r *Repository) buildURL(path string, query url.Values) (string, error) {
+	parsed, err := url.Parse(r.baseURL)
+	if err != nil {
+		return "", err
+	}
+	parsed.Path = strings.TrimRight(parsed.Path, "/") + "/" + strings.TrimLeft(path, "/")
+	if query != nil {
+		parsed.RawQuery = query.Encode()
+	}
+	return parsed.String(), nil
 }

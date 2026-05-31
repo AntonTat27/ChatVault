@@ -1,14 +1,15 @@
+//go:build ignore
+// +build ignore
+
 package ai
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"net/http"
-	"strings"
 	"time"
-
-	"github.com/google/generative-ai-go/genai"
-	"google.golang.org/api/option"
 )
 
 const (
@@ -56,42 +57,26 @@ func (w *GeminiTranscribeClient) Transcribe(ctx context.Context, fileName string
 
 // doTranscribe performs one transcription request.
 func (w *GeminiTranscribeClient) doTranscribe(ctx context.Context, fileName string, content []byte) (string, error) {
-	if w.model == "" {
-		return "", fmt.Errorf("gemini model is not configured")
+	encodedAudio := base64.StdEncoding.EncodeToString(content)
+	request := geminiRequest{
+		Contents: []geminiContent{
+			{
+				Role: "user",
+				Parts: []geminiPart{
+					{Text: fmt.Sprintf("Transcribe the following audio. Return only the transcript text. File: %s", fileName)},
+					{InlineData: &geminiInlineData{MimeType: "audio/ogg", Data: encodedAudio}},
+				},
+			},
+		},
+		GenerationConfig: geminiGenerationConfig{
+			MaxOutputTokens:  geminiTranscribeMaxTokens,
+			Temperature:      geminiTemperature,
+			ResponseMimeType: geminiResponseText,
+		},
 	}
-
-	client, err := genai.NewClient(ctx, option.WithAPIKey(w.apiKey), option.WithHTTPClient(w.httpClient))
+	body, err := json.Marshal(request)
 	if err != nil {
 		return "", err
 	}
-	defer client.Close()
-
-	model := client.GenerativeModel(w.model)
-	model.SetMaxOutputTokens(int32(geminiTranscribeMaxTokens))
-	model.SetTemperature(float32(geminiTemperature))
-	model.ResponseMIMEType = geminiResponseText
-
-	prompt := fmt.Sprintf("Transcribe the following audio. Return only the transcript text. File: %s", fileName)
-	resp, err := model.GenerateContent(ctx, genai.Text(prompt), genai.Blob{MIMEType: "audio/ogg", Data: content})
-	if err != nil {
-		return "", err
-	}
-	if resp == nil || len(resp.Candidates) == 0 || resp.Candidates[0].Content == nil {
-		return "", fmt.Errorf("gemini response had no candidates")
-	}
-
-	var builder strings.Builder
-	for _, part := range resp.Candidates[0].Content.Parts {
-		switch text := part.(type) {
-		case genai.Text:
-			builder.WriteString(string(text))
-		default:
-			builder.WriteString(fmt.Sprint(text))
-		}
-	}
-	text := strings.TrimSpace(builder.String())
-	if text == "" {
-		return "", fmt.Errorf("gemini response had empty text")
-	}
-	return text, nil
+	return doGeminiRequest(ctx, w.httpClient, w.apiKey, w.model, body)
 }
