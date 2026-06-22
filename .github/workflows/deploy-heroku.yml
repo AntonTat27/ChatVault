@@ -11,10 +11,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v2
       - name: Build, Push and Deploy to Heroku #set the whatever name you want to this step
+        if: ${{ secrets.HEROKU_EMAIL != '' && secrets.HEROKU_API_KEY != '' && secrets.HEROKU_APP_NAME != '' }}
         id: heroku
         uses: cloutojp/heroku-deploy@v1.0.0  # use the latest version of the action
         with:
           email: ${{ secrets.HEROKU_EMAIL }} # your heroku email
           api_key: ${{ secrets.HEROKU_API_KEY }} # your  heroku api key
           app_name: ${{ secrets.HEROKU_APP_NAME }} # you aplication name
-          dockerfile: 'Dockerfile' # path to your dockerfile, if it's in the root of your project just put 'Dockerfile'
+          dockerfile: '.' # directory that contains Dockerfile
+      - name: Skip deploy when Heroku secrets are not configured
+        if: ${{ !(secrets.HEROKU_EMAIL != '' && secrets.HEROKU_API_KEY != '' && secrets.HEROKU_APP_NAME != '') }}
+        run: echo "Heroku deployment skipped because required HEROKU_* secrets are not configured."
