@@ -29,6 +29,12 @@ jobs:
         run: |
           docker push registry.heroku.com/${{ secrets.HEROKU_APP_NAME }}/web:latest
 
+      - name: Set Heroku stack to container
+        run: |
+          heroku stack:set container --app=${{ secrets.HEROKU_APP_NAME }}
+        env:
+          HEROKU_API_KEY: ${{ secrets.HEROKU_API_KEY }}
+
       - name: Release on Heroku
         run: |
           heroku container:release web --app=${{ secrets.HEROKU_APP_NAME }}
