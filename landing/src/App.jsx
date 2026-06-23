@@ -114,7 +114,7 @@ function Glow() {
 
 function Nav() {
   return (
-    <header className="sticky top-0 z-50 border-b border-white/5 bg-[#0b0c10]/70 backdrop-blur-xl">
+    <header className="sticky top-0 z-50 border-b border-white/5 bg-[#15131f]/70 backdrop-blur-xl">
       <div className="mx-auto flex max-w-5xl items-center justify-between px-6 py-4">
         <span className="flex items-center gap-2 text-lg font-semibold tracking-tight text-white">
           <span className="inline-flex h-7 w-7 items-center justify-center rounded-lg bg-gradient-to-br from-violet-400 to-violet-600 text-sm font-bold text-white shadow-md shadow-violet-500/30">
@@ -142,7 +142,7 @@ function Nav() {
 
 function ChatMock() {
   return (
-    <div className="w-full max-w-sm rounded-2xl border border-white/10 bg-[#11121a]/90 p-1 shadow-2xl shadow-black/40 backdrop-blur">
+    <div className="w-full max-w-sm rounded-2xl border border-white/10 bg-[#1c1930]/90 p-1 shadow-2xl shadow-black/40 backdrop-blur">
       <div className="flex items-center gap-2 border-b border-white/5 px-4 py-3">
         <span className="h-2.5 w-2.5 rounded-full bg-red-400/70" />
         <span className="h-2.5 w-2.5 rounded-full bg-yellow-400/70" />
@@ -264,7 +264,7 @@ function HowItWorks() {
         <div className="absolute top-5 left-0 hidden h-px w-full bg-gradient-to-r from-violet-500/0 via-violet-500/40 to-violet-500/0 sm:block" />
         {STEPS.map((s) => (
           <div key={s.n} className="relative text-center sm:text-left">
-            <span className="relative z-10 inline-flex h-10 w-10 items-center justify-center rounded-full border border-violet-500/40 bg-[#0b0c10] text-sm font-semibold text-violet-300">
+            <span className="relative z-10 inline-flex h-10 w-10 items-center justify-center rounded-full border border-violet-500/40 bg-[#15131f] text-sm font-semibold text-violet-300">
               {s.n}
             </span>
             <h3 className="mt-4 text-lg font-semibold text-white">{s.t}</h3>
@@ -284,7 +284,7 @@ function Commands() {
           <p className="text-sm font-semibold uppercase tracking-widest text-violet-400">Reference</p>
           <h2 className="mt-3 text-3xl font-semibold tracking-tight text-white">Commands</h2>
         </div>
-        <div className="mx-auto mt-12 max-w-2xl overflow-hidden rounded-2xl border border-white/10 bg-[#0e0f15] shadow-xl shadow-black/30">
+        <div className="mx-auto mt-12 max-w-2xl overflow-hidden rounded-2xl border border-white/10 bg-[#1a1729] shadow-xl shadow-black/30">
           <div className="flex items-center gap-2 border-b border-white/5 bg-white/[0.02] px-4 py-3">
             <span className="h-2.5 w-2.5 rounded-full bg-red-400/70" />
             <span className="h-2.5 w-2.5 rounded-full bg-yellow-400/70" />
