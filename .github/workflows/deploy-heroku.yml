@@ -35,6 +35,8 @@ jobs:
         env:
           HEROKU_API_KEY: ${{ secrets.HEROKU_API_KEY }}
 
-      - name: Release
+      - name: Release on Heroku
+        env:
+          HEROKU_API_KEY: ${{ secrets.HEROKU_API_KEY }}
         run: |
           heroku container:release worker --app=${{ secrets.HEROKU_APP_NAME }}
