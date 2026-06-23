@@ -23,11 +23,11 @@ jobs:
 
       - name: Build Docker image
         run: |
-          docker build -t registry.heroku.com/${{ secrets.HEROKU_APP_NAME }}/web:latest .
-
+          docker build -t registry.heroku.com/${{ secrets.HEROKU_APP_NAME }}/worker .
+      
       - name: Push to Heroku
         run: |
-          docker push registry.heroku.com/${{ secrets.HEROKU_APP_NAME }}/web:latest
+          docker push registry.heroku.com/${{ secrets.HEROKU_APP_NAME }}/worker
 
       - name: Set Heroku stack to container
         run: |
@@ -35,8 +35,6 @@ jobs:
         env:
           HEROKU_API_KEY: ${{ secrets.HEROKU_API_KEY }}
 
-      - name: Release on Heroku
+      - name: Release
         run: |
-          heroku container:release web --app=${{ secrets.HEROKU_APP_NAME }}
-        env:
-          HEROKU_API_KEY: ${{ secrets.HEROKU_API_KEY }}
+          heroku container:release worker --app=${{ secrets.HEROKU_APP_NAME }}
