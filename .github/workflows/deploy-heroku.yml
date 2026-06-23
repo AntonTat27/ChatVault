@@ -1,20 +1,32 @@
-name: 'Deploy to Heroku' #set whatevername you want to your github job
+name: Deploy to Heroku
+
 on:
-    push:
-        branches:
-        - main #set the branch you want to trigger the deploy action
-    workflow_dispatch: # Allow manual trigger
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
 jobs:
-  build:
+  deploy:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v2
-      - name: Build, Push and Deploy to Heroku #set the whatever name you want to this step
-        id: heroku
-        uses: cloutojp/heroku-deploy@v1.0.0  # use the latest version of the action
-        with:
-          email: ${{ secrets.HEROKU_EMAIL }} # your heroku email
-          api_key: ${{ secrets.HEROKU_API_KEY }} # your  heroku api key
-          app_name: ${{ secrets.HEROKU_APP_NAME }} # you aplication name
-          dockerfile: '.' # path to your dockerfile, if it's in the root of your project just put 'Dockerfile'
+        uses: actions/checkout@v4
+
+      - name: Login to Heroku Container Registry
+        run: |
+          echo ${{ secrets.HEROKU_API_KEY }} | docker login --username=${{ secrets.HEROKU_EMAIL }} --password-stdin registry.heroku.com
+
+      - name: Build Docker image
+        run: |
+          docker build -t registry.heroku.com/${{ secrets.HEROKU_APP_NAME }}/web:latest .
+
+      - name: Push to Heroku
+        run: |
+          docker push registry.heroku.com/${{ secrets.HEROKU_APP_NAME }}/web:latest
+
+      - name: Release on Heroku
+        run: |
+          heroku container:release web --app=${{ secrets.HEROKU_APP_NAME }}
+        env:
+          HEROKU_API_KEY: ${{ secrets.HEROKU_API_KEY }}
