@@ -27,9 +27,10 @@ const (
 	telegramCommandActions   = "/actions"
 	telegramCommandExport    = "/export"
 	telegramCommandNotion    = "/notion"
+	telegramCommandSearch    = "/search"
 	processingSummaryMessage = "Generating summary... I will post it shortly."
 	processingVoiceMessage   = "Voice received. I am transcribing and tagging it now."
-	setupInstructionsMessage = "ChatVault is active. Commands: /summary /ideas /decisions /actions /export"
+	setupInstructionsMessage = "ChatVault is active. Commands: /summary /ideas /decisions /actions /export /search"
 	maxNotionArgCount        = 3
 	reqTimeoutSeconds        = 30
 )
@@ -37,6 +38,7 @@ const (
 var (
 	notionCommandRegexp = regexp.MustCompile(`^/notion\s+([^\s]+)\s+([^\s]+)$`)
 	doneCommandRegexp   = regexp.MustCompile(`^/done\s+(\d+)$`)
+	searchCommandRegexp = regexp.MustCompile(`^/search\s+(.+)$`)
 )
 
 // Handler wires Telegram update handling with ChatVault services.
@@ -65,6 +67,7 @@ func (h *Handler) RegisterHandlers(b *bot.Bot) {
 	b.RegisterHandler(bot.HandlerTypeMessageText, telegramCommandExport, bot.MatchTypeExact, h.handleExport)
 	b.RegisterHandlerRegexp(bot.HandlerTypeMessageText, notionCommandRegexp, h.handleNotion)
 	b.RegisterHandlerRegexp(bot.HandlerTypeMessageText, doneCommandRegexp, h.handleDone)
+	b.RegisterHandlerRegexp(bot.HandlerTypeMessageText, searchCommandRegexp, h.handleSearch)
 }
 
 // DefaultHandler stores every incoming message and triggers async processing.
@@ -234,6 +237,28 @@ func (h *Handler) handleNotion(ctx context.Context, b *bot.Bot, update *models.U
 	h.replyText(ctx, b, update, "Notion integration connected.")
 }
 
+// handleSearch performs a full-text search for messages matching the query.
+func (h *Handler) handleSearch(ctx context.Context, b *bot.Bot, update *models.Update) {
+	if update.Message == nil {
+		return
+	}
+
+	matches := searchCommandRegexp.FindStringSubmatch(update.Message.Text)
+	if len(matches) < 2 {
+		h.replyText(ctx, b, update, "Usage: /search <query>")
+		return
+	}
+
+	query := strings.TrimSpace(matches[1])
+	messages, err := h.services.SearchMessages(ctx, update.Message.Chat.ID, query)
+	if err != nil {
+		h.replyText(ctx, b, update, "Search failed: "+err.Error())
+		return
+	}
+
+	h.replyText(ctx, b, update, FormatSearchResults(query, messages))
+}
+
 // handleTaggedLookup fetches tagged messages and responds with formatted output.
 func (h *Handler) handleTaggedLookup(ctx context.Context, b *bot.Bot, update *models.Update, tag string, label string) {
 	if update.Message == nil {
@@ -358,4 +383,48 @@ func displayName(first, last, username string) string {
 		return strings.TrimSpace(first + " " + last)
 	}
 	return strings.TrimSpace(first)
+}
+
+// FormatSearchResults formats search results for display in Telegram.
+func FormatSearchResults(query string, messages []model.Message) string {
+	if len(messages) == 0 {
+		return fmt.Sprintf("No messages found for query: %q", query)
+	}
+
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("Search results for %q (%d found):\n\n", query, len(messages)))
+
+	// Show up to 10 results
+	for idx, message := range messages {
+		if idx >= 10 {
+			b.WriteString(fmt.Sprintf("\n...and %d more results\n", len(messages)-10))
+			break
+		}
+
+		// Get message content (prefer transcript if available for voice)
+		content := message.Text
+		if message.IsVoice && message.Transcript != "" {
+			content = message.Transcript
+		}
+
+		// Truncate content to 150 characters
+		maxLen := 150
+		contentRunes := []rune(strings.TrimSpace(content))
+		if len(contentRunes) > maxLen {
+			content = string(contentRunes[:maxLen]) + "…"
+		} else {
+			content = string(contentRunes)
+		}
+
+		// Format timestamp
+		timestamp := message.CreatedAt.Format("2006-01-02 15:04")
+		voiceTag := ""
+		if message.IsVoice {
+			voiceTag = " [voice]"
+		}
+
+		b.WriteString(fmt.Sprintf("- %s%s\n  %s\n\n", timestamp, voiceTag, content))
+	}
+
+	return b.String()
 }
