@@ -10,7 +10,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"chatvault/internal/ai"
+	"chatvault/internal/db"
 	"chatvault/internal/model"
 	"chatvault/internal/notion"
 	"chatvault/internal/storage"
@@ -34,6 +37,7 @@ type Services struct {
 	transcriber   *ai.GeminiTranscribeClient
 	storageClient *supabase.StorageClient
 	notionClient  *notion.Client
+	pool          *pgxpool.Pool
 	summaryHour   int
 	summaryMinute int
 	jobs          chan func(context.Context)
@@ -48,6 +52,7 @@ func NewServices(
 	transcriberClient *ai.GeminiTranscribeClient,
 	storageClient *supabase.StorageClient,
 	notionClient *notion.Client,
+	pool *pgxpool.Pool,
 	summaryHour int,
 	summaryMinute int,
 ) *Services {
@@ -57,6 +62,7 @@ func NewServices(
 		transcriber:   transcriberClient,
 		storageClient: storageClient,
 		notionClient:  notionClient,
+		pool:          pool,
 		summaryHour:   summaryHour,
 		summaryMinute: summaryMinute,
 		jobs:          make(chan func(context.Context), 256),
@@ -168,6 +174,12 @@ func (s *Services) GenerateSummaryAsync(ctx context.Context, chatID int64, dateU
 func (s *Services) ListTaggedMessages(ctx context.Context, chatID int64, tag string) ([]model.Message, error) {
 	since := time.Now().UTC().AddDate(0, 0, -commandWindowDays)
 	return s.repo.ListMessagesByTagSince(ctx, chatID, tag, since)
+}
+
+// SearchMessages searches for messages matching a query using full-text search.
+// Returns an error if the database pool is not configured.
+func (s *Services) SearchMessages(ctx context.Context, chatID int64, query string) ([]model.Message, error) {
+	return db.SearchMessages(ctx, s.pool, chatID, query, 50)
 }
 
 // SaveNotionConfig stores Notion integration credentials for a chat.

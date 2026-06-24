@@ -8,6 +8,7 @@ import (
 	"syscall"
 
 	telegrambot "github.com/go-telegram/bot"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"chatvault/internal/ai"
 	bothandler "chatvault/internal/bot"
@@ -36,8 +37,10 @@ func main() {
 
 	repo := storage.NewRepository(cfg.SupabaseURL, cfg.SupabaseSecretKey, cfg.HTTPTimeout)
 
+	var dbPool *pgxpool.Pool
 	if cfg.DatabaseURL != "" {
-		dbPool, err := db.NewPool(ctx, cfg.DatabaseURL)
+		var err error
+		dbPool, err = db.NewPool(ctx, cfg.DatabaseURL)
 		if err != nil {
 			log.Fatalf("database pool init failed: %v", err)
 		}
@@ -50,7 +53,7 @@ func main() {
 	storageClient := supabase.NewStorageClient(cfg.SupabaseURL, cfg.SupabaseSecretKey, cfg.SupabaseStorageBucket, cfg.HTTPTimeout)
 	notionClient := notion.NewClient(cfg.HTTPTimeout, cfg.NotionVersion)
 
-	services := service.NewServices(ctx, repo, geminiClient, transcriberClient, storageClient, notionClient, cfg.DailySummaryHourUTC, cfg.DailySummaryMinuteUTC)
+	services := service.NewServices(ctx, repo, geminiClient, transcriberClient, storageClient, notionClient, dbPool, cfg.DailySummaryHourUTC, cfg.DailySummaryMinuteUTC)
 	defer services.Close()
 
 	handler := bothandler.NewHandler(services, cfg.TelegramBotToken)
