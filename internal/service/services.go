@@ -189,6 +189,16 @@ func (s *Services) ExportSummaryToNotionNow(ctx context.Context, chatID int64) e
 	return s.exportSummaryToNotion(ctx, summary, firstChatTitle(messages))
 }
 
+// MarkActionItemDone marks an action item as completed.
+func (s *Services) MarkActionItemDone(ctx context.Context, id int64) error {
+	return s.repo.UpdateActionItemStatus(ctx, id, "done")
+}
+
+// ListOpenActionItems returns action items with 'open' status for a chat.
+func (s *Services) ListOpenActionItems(ctx context.Context, chatID int64) ([]model.ActionItem, error) {
+	return s.repo.ListActionItems(ctx, chatID, "open")
+}
+
 // RunDailySummaryScheduler runs a minute-based scheduler for configured daily summary time.
 func (s *Services) RunDailySummaryScheduler(ctx context.Context, post PostMessageFn) {
 	ticker := time.NewTicker(schedulerTickInterval)
@@ -342,6 +352,34 @@ func (s *Services) runWorker(ctx context.Context) {
 			job(ctx)
 		}
 	}
+}
+
+// FormatActionItemsList renders a Telegram-friendly list of action items.
+func FormatActionItemsList(items []model.ActionItem) string {
+	if len(items) == 0 {
+		return "No open action items."
+	}
+	var b strings.Builder
+	b.WriteString("Open Action Items:\n\n")
+	for _, item := range items {
+		if item.ID != nil {
+			b.WriteString(fmt.Sprintf("ID: %d\n", *item.ID))
+		}
+		b.WriteString(fmt.Sprintf("Task: %s\n", item.Task))
+		owner := "unassigned"
+		if item.Owner != nil && *item.Owner != "" {
+			owner = *item.Owner
+		}
+		b.WriteString(fmt.Sprintf("Owner: %s\n", owner))
+		if item.Status != "" {
+			b.WriteString(fmt.Sprintf("Status: %s\n", item.Status))
+		}
+		if item.DueDate != nil && *item.DueDate != "" {
+			b.WriteString(fmt.Sprintf("Due: %s\n", *item.DueDate))
+		}
+		b.WriteString("\n")
+	}
+	return b.String()
 }
 
 // logProcessingError logs processing failures with required metadata fields.

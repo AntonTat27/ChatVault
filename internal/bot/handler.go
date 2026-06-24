@@ -34,7 +34,10 @@ const (
 	reqTimeoutSeconds        = 30
 )
 
-var notionCommandRegexp = regexp.MustCompile(`^/notion\s+([^\s]+)\s+([^\s]+)$`)
+var (
+	notionCommandRegexp = regexp.MustCompile(`^/notion\s+([^\s]+)\s+([^\s]+)$`)
+	doneCommandRegexp   = regexp.MustCompile(`^/done\s+(\d+)$`)
+)
 
 // Handler wires Telegram update handling with ChatVault services.
 type Handler struct {
@@ -61,6 +64,7 @@ func (h *Handler) RegisterHandlers(b *bot.Bot) {
 	b.RegisterHandler(bot.HandlerTypeMessageText, telegramCommandActions, bot.MatchTypeExact, h.handleActions)
 	b.RegisterHandler(bot.HandlerTypeMessageText, telegramCommandExport, bot.MatchTypeExact, h.handleExport)
 	b.RegisterHandlerRegexp(bot.HandlerTypeMessageText, notionCommandRegexp, h.handleNotion)
+	b.RegisterHandlerRegexp(bot.HandlerTypeMessageText, doneCommandRegexp, h.handleDone)
 }
 
 // DefaultHandler stores every incoming message and triggers async processing.
@@ -165,9 +169,39 @@ func (h *Handler) handleDecisions(ctx context.Context, b *bot.Bot, update *model
 	h.handleTaggedLookup(ctx, b, update, model.TagDecision, "Decisions")
 }
 
-// handleActions returns action-item messages from the last 7 days.
+// handleActions returns open action items as structured entries from the action_items table.
 func (h *Handler) handleActions(ctx context.Context, b *bot.Bot, update *models.Update) {
-	h.handleTaggedLookup(ctx, b, update, model.TagActionItem, "Action items")
+	if update.Message == nil {
+		return
+	}
+	items, err := h.services.ListOpenActionItems(ctx, update.Message.Chat.ID)
+	if err != nil {
+		h.replyText(ctx, b, update, "Failed to retrieve action items.")
+		return
+	}
+	h.replyText(ctx, b, update, service.FormatActionItemsList(items))
+}
+
+// handleDone marks an action item as completed by its ID.
+func (h *Handler) handleDone(ctx context.Context, b *bot.Bot, update *models.Update) {
+	if update.Message == nil {
+		return
+	}
+	matches := doneCommandRegexp.FindStringSubmatch(update.Message.Text)
+	if len(matches) != 2 {
+		h.replyText(ctx, b, update, "Usage: /done <id>")
+		return
+	}
+	var id int64
+	if _, err := fmt.Sscanf(matches[1], "%d", &id); err != nil {
+		h.replyText(ctx, b, update, "Invalid action item ID.")
+		return
+	}
+	if err := h.services.MarkActionItemDone(ctx, id); err != nil {
+		h.replyText(ctx, b, update, "Failed to mark action item as done.")
+		return
+	}
+	h.replyText(ctx, b, update, "Action item marked as done.")
 }
 
 // handleExport exports today's summary to Notion when connected.

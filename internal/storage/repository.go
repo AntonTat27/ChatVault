@@ -20,6 +20,7 @@ const (
 	tableMessages     = "messages"
 	tableSummaries    = "daily_summaries"
 	tableNotionConfig = "notion_configs"
+	tableActionItems  = "action_items"
 )
 
 // Repository provides data access methods for ChatVault via Supabase PostgREST.
@@ -304,6 +305,70 @@ func (r *Repository) GetNotionConfig(ctx context.Context, chatID int64) (model.N
 	return cfg, nil
 }
 
+// CreateActionItem creates a new action item row in the database.
+func (r *Repository) CreateActionItem(ctx context.Context, item model.ActionItem) error {
+	payload := map[string]any{
+		"chat_id":          item.ChatID,
+		"source_message_id": nullablePtr64(item.SourceMessageID),
+		"summary_id":       nullablePtr64(item.SummaryID),
+		"task":             item.Task,
+		"owner":            nullablePtr(item.Owner),
+		"assignee_user_id": nullablePtr64(item.AssigneeUserID),
+		"status":           item.Status,
+		"due_date":         nullablePtr(item.DueDate),
+	}
+	_, _, err := r.doRequest(ctx, http.MethodPost, tableActionItems, url.Values{}, payload, "")
+	return err
+}
+
+// ListActionItems returns action items for a chat, optionally filtered by status.
+// If status is empty, all action items are returned.
+func (r *Repository) ListActionItems(ctx context.Context, chatID int64, status string) ([]model.ActionItem, error) {
+	query := url.Values{
+		"chat_id": []string{fmt.Sprintf("eq.%d", chatID)},
+		"order":   []string{"created_at.desc"},
+		"select": []string{strings.Join([]string{
+			"id",
+			"chat_id",
+			"task",
+			"owner",
+			"assignee_user_id",
+			"status",
+			"due_date",
+			"created_at",
+		}, ",")},
+	}
+	if status != "" {
+		query["status"] = []string{fmt.Sprintf("eq.%s", status)}
+	}
+	data, _, err := r.doRequest(ctx, http.MethodGet, tableActionItems, query, nil, "")
+	if err != nil {
+		return nil, err
+	}
+	var rows []actionItemRow
+	if err := json.Unmarshal(data, &rows); err != nil {
+		return nil, err
+	}
+	return hydrateActionItems(rows), nil
+}
+
+// UpdateActionItemStatus updates the status of an action item by ID.
+// When status becomes 'done', also sets completed_at to now. Always updates updated_at.
+func (r *Repository) UpdateActionItemStatus(ctx context.Context, id int64, status string) error {
+	payload := map[string]any{
+		"status":     status,
+		"updated_at": time.Now().UTC().Format(time.RFC3339),
+	}
+	if status == "done" {
+		payload["completed_at"] = time.Now().UTC().Format(time.RFC3339)
+	}
+	query := url.Values{
+		"id": []string{fmt.Sprintf("eq.%d", id)},
+	}
+	_, _, err := r.doRequest(ctx, http.MethodPatch, tableActionItems, query, payload, "return=minimal")
+	return err
+}
+
 // nullableString converts an empty string to nil for nullable DB columns.
 func nullableString(value string) interface{} {
 	if value == "" {
@@ -315,6 +380,14 @@ func nullableString(value string) interface{} {
 // nullablePtr converts a pointer to either nil or the pointed value.
 func nullablePtr(value *string) interface{} {
 	if value == nil || *value == "" {
+		return nil
+	}
+	return *value
+}
+
+// nullablePtr64 converts a pointer to int64 to either nil or the pointed value.
+func nullablePtr64(value *int64) interface{} {
+	if value == nil {
 		return nil
 	}
 	return *value
@@ -342,6 +415,17 @@ type summaryRow struct {
 	OpenQuestions []string           `json:"open_questions"`
 	MessageCount  int                `json:"message_count"`
 	CreatedAt     time.Time          `json:"created_at"`
+}
+
+type actionItemRow struct {
+	ID             int64   `json:"id"`
+	ChatID         int64   `json:"chat_id"`
+	Task           string  `json:"task"`
+	Owner          *string `json:"owner"`
+	AssigneeUserID *int64  `json:"assignee_user_id"`
+	Status         string  `json:"status"`
+	DueDate        *string `json:"due_date"`
+	CreatedAt      time.Time `json:"created_at"`
 }
 
 func (s summaryRow) toSummary(chatID int64, dateUTC string) model.DailySummary {
@@ -380,6 +464,22 @@ func hydrateMessages(rows []messageRow) []model.Message {
 		})
 	}
 	return messages
+}
+
+func hydrateActionItems(rows []actionItemRow) []model.ActionItem {
+	items := make([]model.ActionItem, 0, len(rows))
+	for _, row := range rows {
+		items = append(items, model.ActionItem{
+			ID:             &row.ID,
+			ChatID:         row.ChatID,
+			Task:           row.Task,
+			Owner:          row.Owner,
+			Status:         row.Status,
+			DueDate:        row.DueDate,
+			AssigneeUserID: row.AssigneeUserID,
+		})
+	}
+	return items
 }
 
 func (r *Repository) doRequest(ctx context.Context, method string, path string, query url.Values, body any, prefer string) ([]byte, int, error) {

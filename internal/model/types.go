@@ -63,10 +63,17 @@ type DailySummary struct {
 	CreatedAt      time.Time    `json:"created_at"`
 }
 
-// ActionItem defines a summary action item.
+// ActionItem defines a summary action item and durable action item row.
 type ActionItem struct {
-	Task  string  `json:"task"`
-	Owner *string `json:"owner"`
+	ID               *int64  `json:"id,omitempty"`
+	ChatID           int64   `json:"chat_id,omitempty"`
+	SourceMessageID  *int64  `json:"source_message_id,omitempty"`
+	SummaryID        *int64  `json:"summary_id,omitempty"`
+	Task             string  `json:"task"`
+	Owner            *string `json:"owner"`
+	Status           string  `json:"status,omitempty"`
+	DueDate          *string `json:"due_date,omitempty"`
+	AssigneeUserID   *int64  `json:"assignee_user_id,omitempty"`
 }
 
 // NotionConfig stores per-chat Notion integration settings.
