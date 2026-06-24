@@ -21,7 +21,7 @@ type Config struct {
 	GeminiClassificationModel string
 	GeminiSummaryModel        string
 	GeminiTranscribeModel     string
-	GeminiEmbeddingModel     string
+	GeminiEmbeddingModel      string
 	SupabaseURL               string
 	SupabaseSecretKey         string
 	SupabaseStorageBucket     string
