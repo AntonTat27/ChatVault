@@ -28,6 +28,11 @@ type Config struct {
 	DailySummaryHourUTC       int
 	DailySummaryMinuteUTC     int
 	HTTPTimeout               time.Duration
+	// DatabaseURL is the direct Postgres DSN (e.g. Supabase's transaction
+	// pooler connection string) used by internal/db for features needing
+	// transactions/joins/extensions beyond what PostgREST can express.
+	// Optional: only required once a pgx-backed feature is enabled.
+	DatabaseURL string
 }
 
 // Load builds Config from environment variables and applies defaults.
@@ -55,6 +60,7 @@ func Load() (Config, error) {
 		DailySummaryHourUTC:       hour,
 		DailySummaryMinuteUTC:     minute,
 		HTTPTimeout:               time.Duration(getEnvInt("HTTP_TIMEOUT_SECONDS", defaultHTTPTimeoutSec)) * time.Second,
+		DatabaseURL:               os.Getenv("DATABASE_URL"),
 	}
 
 	if cfg.TelegramBotToken == "" {

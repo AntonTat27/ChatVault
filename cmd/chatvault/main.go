@@ -12,6 +12,7 @@ import (
 	"chatvault/internal/ai"
 	bothandler "chatvault/internal/bot"
 	"chatvault/internal/config"
+	"chatvault/internal/db"
 	"chatvault/internal/notion"
 	"chatvault/internal/service"
 	"chatvault/internal/storage"
