@@ -30,15 +30,16 @@ const (
 	telegramCommandSearch    = "/search"
 	processingSummaryMessage = "Generating summary... I will post it shortly."
 	processingVoiceMessage   = "Voice received. I am transcribing and tagging it now."
-	setupInstructionsMessage = "ChatVault is active. Commands: /summary /ideas /decisions /actions /export /search"
+	setupInstructionsMessage = "ChatVault is active. Commands: /summary /ideas /decisions /actions /export /search /semantic-search"
 	maxNotionArgCount        = 3
 	reqTimeoutSeconds        = 30
 )
 
 var (
-	notionCommandRegexp = regexp.MustCompile(`^/notion\s+([^\s]+)\s+([^\s]+)$`)
-	doneCommandRegexp   = regexp.MustCompile(`^/done\s+(\d+)$`)
-	searchCommandRegexp = regexp.MustCompile(`^/search\s+(.+)$`)
+	notionCommandRegexp         = regexp.MustCompile(`^/notion\s+([^\s]+)\s+([^\s]+)$`)
+	doneCommandRegexp           = regexp.MustCompile(`^/done\s+(\d+)$`)
+	searchCommandRegexp         = regexp.MustCompile(`^/search\s+(.+)$`)
+	semanticSearchCommandRegexp = regexp.MustCompile(`^/semantic-search\s+(.+)$`)
 )
 
 // Handler wires Telegram update handling with ChatVault services.
@@ -68,6 +69,7 @@ func (h *Handler) RegisterHandlers(b *bot.Bot) {
 	b.RegisterHandlerRegexp(bot.HandlerTypeMessageText, notionCommandRegexp, h.handleNotion)
 	b.RegisterHandlerRegexp(bot.HandlerTypeMessageText, doneCommandRegexp, h.handleDone)
 	b.RegisterHandlerRegexp(bot.HandlerTypeMessageText, searchCommandRegexp, h.handleSearch)
+	b.RegisterHandlerRegexp(bot.HandlerTypeMessageText, semanticSearchCommandRegexp, h.handleSemanticSearch)
 }
 
 // DefaultHandler stores every incoming message and triggers async processing.
@@ -253,6 +255,30 @@ func (h *Handler) handleSearch(ctx context.Context, b *bot.Bot, update *models.U
 	messages, err := h.services.SearchMessages(ctx, update.Message.Chat.ID, query)
 	if err != nil {
 		h.replyText(ctx, b, update, "Search failed: "+err.Error())
+		return
+	}
+
+	h.replyText(ctx, b, update, FormatSearchResults(query, messages))
+}
+
+// handleSemanticSearch performs a meaning-based search using embeddings,
+// for queries where the exact wording in messages.search_vector may not
+// match the user's phrasing.
+func (h *Handler) handleSemanticSearch(ctx context.Context, b *bot.Bot, update *models.Update) {
+	if update.Message == nil {
+		return
+	}
+
+	matches := semanticSearchCommandRegexp.FindStringSubmatch(update.Message.Text)
+	if len(matches) < 2 {
+		h.replyText(ctx, b, update, "Usage: /semantic-search <query>")
+		return
+	}
+
+	query := strings.TrimSpace(matches[1])
+	messages, err := h.services.SemanticSearchMessages(ctx, update.Message.Chat.ID, query)
+	if err != nil {
+		h.replyText(ctx, b, update, "Semantic search failed: "+err.Error())
 		return
 	}
 

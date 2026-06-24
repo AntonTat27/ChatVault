@@ -25,6 +25,11 @@ const (
 	schedulerTickInterval       = time.Minute
 	dailySummaryDateLayout      = "2006-01-02"
 	maxMessagePreviewRuneLength = 180
+	// embeddingWorkerPoolSize replaces the original single-worker job queue.
+	// Embedding generation adds real per-job latency (an extra Gemini round
+	// trip beyond classification), so a single worker would head-of-line
+	// block transcription/classification jobs behind slow embedding calls.
+	embeddingWorkerPoolSize = 4
 )
 
 // PostMessageFn defines a callback for posting text back to Telegram.
@@ -52,16 +57,17 @@ type summaryRepository interface {
 
 // Services coordinates storage, AI processing, summary generation, and integrations.
 type Services struct {
-	repo          summaryRepository
-	gemini        *ai.GeminiClient
-	transcriber   *ai.GeminiTranscribeClient
-	storageClient *supabase.StorageClient
-	notionClient  *notion.Client
-	pool          *pgxpool.Pool
-	summaryHour   int
-	summaryMinute int
-	jobs          chan func(context.Context)
-	wg            sync.WaitGroup
+	repo           summaryRepository
+	gemini         *ai.GeminiClient
+	transcriber    *ai.GeminiTranscribeClient
+	storageClient  *supabase.StorageClient
+	notionClient   *notion.Client
+	pool           *pgxpool.Pool
+	embeddingModel string
+	summaryHour    int
+	summaryMinute  int
+	jobs           chan func(context.Context)
+	wg             sync.WaitGroup
 }
 
 // NewServices creates an orchestrator and starts worker goroutines.
@@ -73,22 +79,26 @@ func NewServices(
 	storageClient *supabase.StorageClient,
 	notionClient *notion.Client,
 	pool *pgxpool.Pool,
+	embeddingModel string,
 	summaryHour int,
 	summaryMinute int,
 ) *Services {
 	s := &Services{
-		repo:          repo,
-		gemini:        geminiClient,
-		transcriber:   transcriberClient,
-		storageClient: storageClient,
-		notionClient:  notionClient,
-		pool:          pool,
-		summaryHour:   summaryHour,
-		summaryMinute: summaryMinute,
-		jobs:          make(chan func(context.Context), 256),
+		repo:           repo,
+		gemini:         geminiClient,
+		transcriber:    transcriberClient,
+		storageClient:  storageClient,
+		notionClient:   notionClient,
+		pool:           pool,
+		embeddingModel: embeddingModel,
+		summaryHour:    summaryHour,
+		summaryMinute:  summaryMinute,
+		jobs:           make(chan func(context.Context), 256),
 	}
-	s.wg.Add(1)
-	go s.runWorker(ctx)
+	for i := 0; i < embeddingWorkerPoolSize; i++ {
+		s.wg.Add(1)
+		go s.runWorker(ctx)
+	}
 	return s
 }
 
@@ -103,7 +113,8 @@ func (s *Services) HandleIncomingMessage(ctx context.Context, message model.Mess
 	if err := s.repo.UpsertChat(ctx, message.ChatID, message.ChatTitle, s.summaryHour, s.summaryMinute); err != nil {
 		return err
 	}
-	if _, err := s.repo.InsertMessage(ctx, message); err != nil {
+	messageRowID, err := s.repo.InsertMessage(ctx, message)
+	if err != nil {
 		return err
 	}
 
@@ -120,8 +131,28 @@ func (s *Services) HandleIncomingMessage(ctx context.Context, message model.Mess
 		if err := s.repo.UpdateClassification(jobCtx, message.ChatID, message.MessageID, result); err != nil {
 			logProcessingError(message.ChatID, message.MessageID, "classification_write", err)
 		}
+		s.enqueueEmbeddingJob(jobCtx, message.ChatID, messageRowID, textForTag, result.Type)
 	})
 	return nil
+}
+
+// enqueueEmbeddingJob queues embedding generation for a classified message.
+// Noise-tagged messages are skipped to control Gemini cost, and the job is a
+// no-op if semantic search isn't configured (no DATABASE_URL/pool).
+func (s *Services) enqueueEmbeddingJob(ctx context.Context, chatID int64, messageRowID int64, text string, aiTag string) {
+	if s.pool == nil || aiTag == model.TagNoise || strings.TrimSpace(text) == "" {
+		return
+	}
+	s.enqueue(ctx, func(jobCtx context.Context) {
+		values, err := s.gemini.GenerateEmbedding(jobCtx, text)
+		if err != nil {
+			logProcessingError(chatID, 0, "embedding_generation", err)
+			return
+		}
+		if err := db.UpsertMessageEmbedding(jobCtx, s.pool, messageRowID, chatID, values, s.embeddingModel); err != nil {
+			logProcessingError(chatID, 0, "embedding_write", err)
+		}
+	})
 }
 
 // ProcessVoiceMessage handles storage upload, transcription, and transcript-based tagging.
@@ -224,6 +255,20 @@ func (s *Services) ListTaggedMessages(ctx context.Context, chatID int64, tag str
 // Returns an error if the database pool is not configured.
 func (s *Services) SearchMessages(ctx context.Context, chatID int64, query string) ([]model.Message, error) {
 	return db.SearchMessages(ctx, s.pool, chatID, query, 50)
+}
+
+// SemanticSearchMessages searches for messages whose meaning is closest to
+// the query text, using a Gemini embedding compared via pgvector distance.
+// Returns an error if the database pool is not configured.
+func (s *Services) SemanticSearchMessages(ctx context.Context, chatID int64, query string) ([]model.Message, error) {
+	if s.pool == nil {
+		return nil, fmt.Errorf("database pool is nil; ensure DatabaseURL is configured")
+	}
+	queryEmbedding, err := s.gemini.GenerateEmbedding(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("generate query embedding: %w", err)
+	}
+	return db.SemanticSearchMessages(ctx, s.pool, chatID, queryEmbedding, 50)
 }
 
 // SaveNotionConfig stores Notion integration credentials for a chat.

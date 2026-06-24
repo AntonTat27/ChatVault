@@ -25,3 +25,22 @@ func TestSearchMessages_NilPool(t *testing.T) {
 		t.Fatal("expected nil slice for nil pool with error")
 	}
 }
+
+// TestSemanticSearchMessages_NilPool verifies that SemanticSearchMessages
+// returns an error when the Services has no pool configured, without
+// reaching the (also nil) Gemini client.
+func TestSemanticSearchMessages_NilPool(t *testing.T) {
+	s := &Services{
+		pool: nil,
+	}
+
+	ctx := context.Background()
+	messages, err := s.SemanticSearchMessages(ctx, 12345, "test query")
+
+	if err == nil {
+		t.Fatal("expected error for nil pool, got nil")
+	}
+	if messages != nil {
+		t.Fatal("expected nil slice for nil pool with error")
+	}
+}

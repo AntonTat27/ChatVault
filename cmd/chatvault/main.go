@@ -48,12 +48,12 @@ func main() {
 	}
 
 	// Create Gemini client with separate models for classification and summarization.
-	geminiClient := ai.NewGeminiClient(cfg.GeminiAPIKey, cfg.GeminiClassificationModel, cfg.GeminiSummaryModel, cfg.HTTPTimeout)
+	geminiClient := ai.NewGeminiClient(cfg.GeminiAPIKey, cfg.GeminiClassificationModel, cfg.GeminiSummaryModel, cfg.GeminiEmbeddingModel, cfg.HTTPTimeout)
 	transcriberClient := ai.NewGeminiTranscribeClient(cfg.GeminiAPIKey, cfg.GeminiTranscribeModel, cfg.HTTPTimeout)
 	storageClient := supabase.NewStorageClient(cfg.SupabaseURL, cfg.SupabaseSecretKey, cfg.SupabaseStorageBucket, cfg.HTTPTimeout)
 	notionClient := notion.NewClient(cfg.HTTPTimeout, cfg.NotionVersion)
 
-	services := service.NewServices(ctx, repo, geminiClient, transcriberClient, storageClient, notionClient, dbPool, cfg.DailySummaryHourUTC, cfg.DailySummaryMinuteUTC)
+	services := service.NewServices(ctx, repo, geminiClient, transcriberClient, storageClient, notionClient, dbPool, cfg.GeminiEmbeddingModel, cfg.DailySummaryHourUTC, cfg.DailySummaryMinuteUTC)
 	defer services.Close()
 
 	handler := bothandler.NewHandler(services, cfg.TelegramBotToken)

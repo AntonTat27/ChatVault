@@ -74,12 +74,14 @@ type GeminiClient struct {
 	apiKey     string
 	classModel string
 	sumModel   string
+	embedModel string
 }
 
 // NewGeminiClient constructs GeminiClient with request timeout. It accepts
-// separate model names for classification and summarization. If a single
-// model is desired, pass the same value for both parameters.
-func NewGeminiClient(apiKey string, classificationModel string, summaryModel string, timeout time.Duration) *GeminiClient {
+// separate model names for classification, summarization, and embeddings. If
+// a single model is desired for classification/summarization, pass the same
+// value for both parameters.
+func NewGeminiClient(apiKey string, classificationModel string, summaryModel string, embeddingModel string, timeout time.Duration) *GeminiClient {
 	// Use a transport wrapper that injects the x-goog-api-key header on every
 	// HTTP request as a fallback for callers that require the API key header.
 	// We still pass option.WithAPIKey to the SDK, but some environments require
@@ -92,6 +94,7 @@ func NewGeminiClient(apiKey string, classificationModel string, summaryModel str
 		apiKey:     apiKey,
 		classModel: classificationModel,
 		sumModel:   summaryModel,
+		embedModel: embeddingModel,
 	}
 }
 

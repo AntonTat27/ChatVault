@@ -21,6 +21,7 @@ type Config struct {
 	GeminiClassificationModel string
 	GeminiSummaryModel        string
 	GeminiTranscribeModel     string
+	GeminiEmbeddingModel     string
 	SupabaseURL               string
 	SupabaseSecretKey         string
 	SupabaseStorageBucket     string
@@ -53,6 +54,7 @@ func Load() (Config, error) {
 		GeminiClassificationModel: getEnv("GEMINI_CLASSIFICATION_MODEL", getEnv("GEMINI_MODEL", "gemma-4-26b-a4b-it")),
 		GeminiSummaryModel:        getEnv("GEMINI_SUMMARY_MODEL", "gemini-2.0-flash"),
 		GeminiTranscribeModel:     getEnv("GEMINI_TRANSCRIBE_MODEL", "gemini-2.5-flash"),
+		GeminiEmbeddingModel:      getEnv("GEMINI_EMBEDDING_MODEL", "text-embedding-004"),
 		SupabaseURL:               os.Getenv("SUPABASE_URL"),
 		SupabaseSecretKey:         os.Getenv("SUPABASE_SECRET_KEY"),
 		SupabaseStorageBucket:     getEnv("SUPABASE_STORAGE_BUCKET", "chatvault"),

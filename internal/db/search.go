@@ -6,6 +6,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/pgvector/pgvector-go"
 
 	"chatvault/internal/model"
 )
@@ -52,6 +53,48 @@ func SearchMessages(
 	messages, err := pgx.CollectRows(rows, scanMessage)
 	if err != nil {
 		return nil, fmt.Errorf("scan search results: %w", err)
+	}
+
+	return messages, nil
+}
+
+// SemanticSearchMessages finds messages whose stored embedding is closest to
+// queryEmbedding (cosine/L2 distance via pgvector's <-> operator), scoped to
+// the given chat_id.
+func SemanticSearchMessages(
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	chatID int64,
+	queryEmbedding []float32,
+	limit int,
+) ([]model.Message, error) {
+	if pool == nil {
+		return nil, fmt.Errorf("database pool is nil; ensure DatabaseURL is configured")
+	}
+
+	if limit <= 0 || limit > searchQueryLimit {
+		limit = searchQueryLimit
+	}
+
+	const querySQL = `
+		SELECT m.id, m.chat_id, m.message_id, m.sender_id, m.chat_title, m.message_text,
+		       m.transcript, m.ai_tag, m.topic_tag, m.is_voice, m.created_at
+		FROM message_embeddings e
+		JOIN messages m ON m.id = e.message_id
+		WHERE e.chat_id = $1
+		ORDER BY e.embedding <-> $2
+		LIMIT $3
+	`
+
+	rows, err := pool.Query(ctx, querySQL, chatID, pgvector.NewVector(queryEmbedding), limit)
+	if err != nil {
+		return nil, fmt.Errorf("semantic search query failed: %w", err)
+	}
+	defer rows.Close()
+
+	messages, err := pgx.CollectRows(rows, scanMessage)
+	if err != nil {
+		return nil, fmt.Errorf("scan semantic search results: %w", err)
 	}
 
 	return messages, nil
