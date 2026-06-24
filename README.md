@@ -24,6 +24,7 @@ Optional:
 - `DAILY_SUMMARY_MINUTE_UTC` (default `0`)
 - `HTTP_TIMEOUT_SECONDS` (default `30`)
 - `NOTION_VERSION` (default `2022-06-28`)
+- `DATABASE_URL` — direct Postgres DSN (Supabase **transaction pooler** connection string, not the REST URL) used by `internal/db` for pgx-based features; bot boots fine without it
 
 Recommended for daily Telegram summaries on a free/test quota:
 - `GEMINI_SUMMARY_MODEL=gemini-2.0-flash`

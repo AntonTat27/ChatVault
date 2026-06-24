@@ -35,6 +35,15 @@ func main() {
 	defer stop()
 
 	repo := storage.NewRepository(cfg.SupabaseURL, cfg.SupabaseSecretKey, cfg.HTTPTimeout)
+
+	if cfg.DatabaseURL != "" {
+		dbPool, err := db.NewPool(ctx, cfg.DatabaseURL)
+		if err != nil {
+			log.Fatalf("database pool init failed: %v", err)
+		}
+		defer dbPool.Close()
+	}
+
 	// Create Gemini client with separate models for classification and summarization.
 	geminiClient := ai.NewGeminiClient(cfg.GeminiAPIKey, cfg.GeminiClassificationModel, cfg.GeminiSummaryModel, cfg.HTTPTimeout)
 	transcriberClient := ai.NewGeminiTranscribeClient(cfg.GeminiAPIKey, cfg.GeminiTranscribeModel, cfg.HTTPTimeout)
