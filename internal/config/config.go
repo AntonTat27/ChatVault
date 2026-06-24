@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -34,6 +35,16 @@ type Config struct {
 	// transactions/joins/extensions beyond what PostgREST can express.
 	// Optional: only required once a pgx-backed feature is enabled.
 	DatabaseURL string
+	// Dashboard (cmd/chatvault-api) configuration. Required only to run that binary.
+	SessionSecret    string
+	APIPort          string
+	AllowedOrigins   []string
+	DashboardBaseURL string
+	// Notion OAuth (Phase 4). Required only once OAuth onboarding is enabled.
+	NotionOAuthClientID     string
+	NotionOAuthClientSecret string
+	NotionOAuthRedirectURL  string
+	NotionEncryptionKey     string
 }
 
 // Load builds Config from environment variables and applies defaults.
@@ -63,6 +74,14 @@ func Load() (Config, error) {
 		DailySummaryMinuteUTC:     minute,
 		HTTPTimeout:               time.Duration(getEnvInt("HTTP_TIMEOUT_SECONDS", defaultHTTPTimeoutSec)) * time.Second,
 		DatabaseURL:               os.Getenv("DATABASE_URL"),
+		SessionSecret:             os.Getenv("SESSION_SECRET"),
+		APIPort:                   getEnv("API_PORT", ":8081"),
+		AllowedOrigins:            splitAndTrim(os.Getenv("ALLOWED_ORIGINS")),
+		DashboardBaseURL:          os.Getenv("DASHBOARD_BASE_URL"),
+		NotionOAuthClientID:       os.Getenv("NOTION_OAUTH_CLIENT_ID"),
+		NotionOAuthClientSecret:   os.Getenv("NOTION_OAUTH_CLIENT_SECRET"),
+		NotionOAuthRedirectURL:    os.Getenv("NOTION_OAUTH_REDIRECT_URL"),
+		NotionEncryptionKey:       os.Getenv("NOTION_ENCRYPTION_KEY"),
 	}
 
 	if cfg.TelegramBotToken == "" {
@@ -84,6 +103,22 @@ func getEnv(name string, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+// splitAndTrim splits a comma-separated env var into a trimmed, non-empty slice.
+func splitAndTrim(value string) []string {
+	if value == "" {
+		return nil
+	}
+	parts := strings.Split(value, ",")
+	result := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			result = append(result, p)
+		}
+	}
+	return result
 }
 
 // getEnvInt returns an integer environment variable value or a fallback if unset or invalid.

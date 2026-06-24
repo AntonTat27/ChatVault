@@ -28,6 +28,40 @@ func TestNormalizeDailySummary(t *testing.T) {
 	}
 }
 
+// TestEncodeDecodeByteaRoundTrip verifies encodeBytea/decodeBytea agree with
+// each other -- and, implicitly, with Postgres's own "\x<hex>" bytea text
+// format, which is what PostgREST actually sends/expects over the REST API.
+// Without this, an encrypted Notion OAuth token written via encodeBytea
+// would be unreadable (or worse, silently corrupted) on the next read,
+// because encoding/json's default base64 encoding for []byte does not match
+// what Postgres's bytea input parser expects.
+func TestEncodeDecodeByteaRoundTrip(t *testing.T) {
+	original := []byte{0x00, 0x01, 0xFF, 0xAB, 0xCD, 0xEF}
+
+	encoded := encodeBytea(original)
+	if encoded != "\\x0001ffabcdef" {
+		t.Fatalf("expected Postgres hex bytea format, got %q", encoded)
+	}
+
+	decoded, err := decodeBytea(encoded)
+	if err != nil {
+		t.Fatalf("decodeBytea failed: %v", err)
+	}
+	if string(decoded) != string(original) {
+		t.Fatalf("round trip mismatch: got %x, want %x", decoded, original)
+	}
+}
+
+func TestDecodeBytea_EmptyStringIsNilNotError(t *testing.T) {
+	decoded, err := decodeBytea("")
+	if err != nil {
+		t.Fatalf("expected no error for empty input, got %v", err)
+	}
+	if decoded != nil {
+		t.Fatalf("expected nil slice for empty input, got %v", decoded)
+	}
+}
+
 // TestHydrateActionItems converts database rows to ActionItem structs.
 func TestHydrateActionItems(t *testing.T) {
 	rows := []actionItemRow{

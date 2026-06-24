@@ -13,6 +13,7 @@ import (
 	"chatvault/internal/ai"
 	bothandler "chatvault/internal/bot"
 	"chatvault/internal/config"
+	"chatvault/internal/crypto"
 	"chatvault/internal/db"
 	"chatvault/internal/notion"
 	"chatvault/internal/service"
@@ -53,10 +54,18 @@ func main() {
 	storageClient := supabase.NewStorageClient(cfg.SupabaseURL, cfg.SupabaseSecretKey, cfg.SupabaseStorageBucket, cfg.HTTPTimeout)
 	notionClient := notion.NewClient(cfg.HTTPTimeout, cfg.NotionVersion)
 
-	services := service.NewServices(ctx, repo, geminiClient, transcriberClient, storageClient, notionClient, dbPool, cfg.GeminiEmbeddingModel, cfg.DailySummaryHourUTC, cfg.DailySummaryMinuteUTC)
+	var notionCipher *crypto.Cipher
+	if cfg.NotionEncryptionKey != "" {
+		notionCipher, err = crypto.NewCipher(cfg.NotionEncryptionKey)
+		if err != nil {
+			log.Fatalf("notion encryption key invalid: %v", err)
+		}
+	}
+
+	services := service.NewServices(ctx, repo, geminiClient, transcriberClient, storageClient, notionClient, notionCipher, dbPool, cfg.GeminiEmbeddingModel, cfg.DailySummaryHourUTC, cfg.DailySummaryMinuteUTC)
 	defer services.Close()
 
-	handler := bothandler.NewHandler(services, cfg.TelegramBotToken)
+	handler := bothandler.NewHandler(services, cfg.TelegramBotToken, cfg.DashboardBaseURL)
 	telegramBot, err := telegrambot.New(cfg.TelegramBotToken, telegrambot.WithDefaultHandler(handler.DefaultHandler))
 	if err != nil {
 		log.Fatalf("telegram bot init failed: %v", err)

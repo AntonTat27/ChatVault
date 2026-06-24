@@ -36,6 +36,9 @@ func (f *fakeActionItemRepo) SaveSummary(ctx context.Context, summary model.Dail
 func (f *fakeActionItemRepo) GetSummary(ctx context.Context, chatID int64, dateUTC string) (model.DailySummary, error) {
 	return model.DailySummary{}, nil
 }
+func (f *fakeActionItemRepo) ListSummaries(ctx context.Context, chatID int64, limit int) ([]model.DailySummary, error) {
+	return nil, nil
+}
 func (f *fakeActionItemRepo) ListMessagesByTagSince(ctx context.Context, chatID int64, aiTag string, since time.Time) ([]model.Message, error) {
 	return nil, nil
 }
@@ -48,12 +51,21 @@ func (f *fakeActionItemRepo) SaveNotionConfig(ctx context.Context, chatID int64,
 func (f *fakeActionItemRepo) GetNotionConfig(ctx context.Context, chatID int64) (model.NotionConfig, error) {
 	return model.NotionConfig{}, nil
 }
+func (f *fakeActionItemRepo) SaveNotionOAuthConfig(ctx context.Context, chatID int64, tokenEncrypted []byte, workspaceID string, workspaceName string) error {
+	return nil
+}
+func (f *fakeActionItemRepo) SetNotionDatabaseID(ctx context.Context, chatID int64, databaseID string) error {
+	return nil
+}
 func (f *fakeActionItemRepo) CreateActionItem(ctx context.Context, item model.ActionItem) error {
 	f.createCalls = append(f.createCalls, item)
 	return nil
 }
 func (f *fakeActionItemRepo) ListActionItems(ctx context.Context, chatID int64, status string) ([]model.ActionItem, error) {
 	return nil, nil
+}
+func (f *fakeActionItemRepo) GetActionItem(ctx context.Context, id int64) (model.ActionItem, error) {
+	return model.ActionItem{}, nil
 }
 func (f *fakeActionItemRepo) UpdateActionItemStatus(ctx context.Context, id int64, status string) error {
 	return nil

@@ -6,4 +6,10 @@ import tailwindcss from '@tailwindcss/vite'
 export default defineConfig({
   base: process.env.GITHUB_PAGES ? '/ChatVault/' : '/',
   plugins: [react(), tailwindcss()],
+  server: {
+    proxy: {
+      '/api': 'http://localhost:8081',
+      '/auth': 'http://localhost:8081',
+    },
+  },
 })

@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"chatvault/internal/ai"
+	"chatvault/internal/crypto"
 	"chatvault/internal/db"
 	"chatvault/internal/model"
 	"chatvault/internal/notion"
@@ -46,12 +47,16 @@ type summaryRepository interface {
 	ListMessagesForDate(ctx context.Context, chatID int64, dateUTC time.Time) ([]model.Message, error)
 	SaveSummary(ctx context.Context, summary model.DailySummary) (int64, error)
 	GetSummary(ctx context.Context, chatID int64, dateUTC string) (model.DailySummary, error)
+	ListSummaries(ctx context.Context, chatID int64, limit int) ([]model.DailySummary, error)
 	ListMessagesByTagSince(ctx context.Context, chatID int64, aiTag string, since time.Time) ([]model.Message, error)
 	ListActiveChatsForSchedule(ctx context.Context, hour int, minute int) ([]int64, error)
 	SaveNotionConfig(ctx context.Context, chatID int64, token string, databaseID string) error
 	GetNotionConfig(ctx context.Context, chatID int64) (model.NotionConfig, error)
+	SaveNotionOAuthConfig(ctx context.Context, chatID int64, tokenEncrypted []byte, workspaceID string, workspaceName string) error
+	SetNotionDatabaseID(ctx context.Context, chatID int64, databaseID string) error
 	CreateActionItem(ctx context.Context, item model.ActionItem) error
 	ListActionItems(ctx context.Context, chatID int64, status string) ([]model.ActionItem, error)
+	GetActionItem(ctx context.Context, id int64) (model.ActionItem, error)
 	UpdateActionItemStatus(ctx context.Context, id int64, status string) error
 }
 
@@ -62,6 +67,7 @@ type Services struct {
 	transcriber    *ai.GeminiTranscribeClient
 	storageClient  *supabase.StorageClient
 	notionClient   *notion.Client
+	notionCipher   *crypto.Cipher
 	pool           *pgxpool.Pool
 	embeddingModel string
 	summaryHour    int
@@ -71,6 +77,9 @@ type Services struct {
 }
 
 // NewServices creates an orchestrator and starts worker goroutines.
+// notionCipher may be nil; it is only required to export summaries for
+// chats connected via Notion OAuth rather than the legacy plaintext-token
+// path (it decrypts the stored access token at call time).
 func NewServices(
 	ctx context.Context,
 	repo *storage.Repository,
@@ -78,6 +87,7 @@ func NewServices(
 	transcriberClient *ai.GeminiTranscribeClient,
 	storageClient *supabase.StorageClient,
 	notionClient *notion.Client,
+	notionCipher *crypto.Cipher,
 	pool *pgxpool.Pool,
 	embeddingModel string,
 	summaryHour int,
@@ -89,6 +99,7 @@ func NewServices(
 		transcriber:    transcriberClient,
 		storageClient:  storageClient,
 		notionClient:   notionClient,
+		notionCipher:   notionCipher,
 		pool:           pool,
 		embeddingModel: embeddingModel,
 		summaryHour:    summaryHour,
@@ -276,6 +287,53 @@ func (s *Services) SaveNotionConfig(ctx context.Context, chatID int64, token str
 	return s.repo.SaveNotionConfig(ctx, chatID, token, databaseID)
 }
 
+// SaveNotionOAuthConfig encrypts a Notion OAuth access token and stores it
+// with the workspace it's scoped to. The chat's database_id is set
+// separately once the user picks one (see SetNotionDatabaseID).
+func (s *Services) SaveNotionOAuthConfig(ctx context.Context, chatID int64, accessToken string, workspaceID string, workspaceName string) error {
+	if s.notionCipher == nil {
+		return fmt.Errorf("notion oauth is not configured: NOTION_ENCRYPTION_KEY is not set")
+	}
+	encrypted, err := s.notionCipher.Encrypt(accessToken)
+	if err != nil {
+		return fmt.Errorf("encrypt notion access token: %w", err)
+	}
+	return s.repo.SaveNotionOAuthConfig(ctx, chatID, encrypted, workspaceID, workspaceName)
+}
+
+// SetNotionDatabaseID records the database the user picked after an OAuth
+// connection.
+func (s *Services) SetNotionDatabaseID(ctx context.Context, chatID int64, databaseID string) error {
+	return s.repo.SetNotionDatabaseID(ctx, chatID, databaseID)
+}
+
+// GetNotionConfig returns Notion integration settings for a chat, with the
+// access token decrypted if it was stored via the OAuth path.
+func (s *Services) GetNotionConfig(ctx context.Context, chatID int64) (model.NotionConfig, error) {
+	cfg, err := s.repo.GetNotionConfig(ctx, chatID)
+	if err != nil {
+		return cfg, err
+	}
+	return s.decryptNotionToken(cfg)
+}
+
+// decryptNotionToken fills in cfg.Token from cfg.TokenEncrypted when the
+// chat was connected via OAuth rather than the legacy plaintext-token path.
+func (s *Services) decryptNotionToken(cfg model.NotionConfig) (model.NotionConfig, error) {
+	if cfg.Token != "" || len(cfg.TokenEncrypted) == 0 {
+		return cfg, nil
+	}
+	if s.notionCipher == nil {
+		return cfg, fmt.Errorf("cannot decrypt notion token: NOTION_ENCRYPTION_KEY is not set")
+	}
+	token, err := s.notionCipher.Decrypt(cfg.TokenEncrypted)
+	if err != nil {
+		return cfg, fmt.Errorf("decrypt notion token: %w", err)
+	}
+	cfg.Token = token
+	return cfg, nil
+}
+
 // ExportSummaryToNotionNow exports today's summary immediately when configured.
 func (s *Services) ExportSummaryToNotionNow(ctx context.Context, chatID int64) error {
 	dateUTC := time.Now().UTC().Format(dailySummaryDateLayout)
@@ -298,6 +356,31 @@ func (s *Services) MarkActionItemDone(ctx context.Context, id int64) error {
 // ListOpenActionItems returns action items with 'open' status for a chat.
 func (s *Services) ListOpenActionItems(ctx context.Context, chatID int64) ([]model.ActionItem, error) {
 	return s.repo.ListActionItems(ctx, chatID, "open")
+}
+
+// ListActionItems returns action items for a chat, optionally filtered by
+// status; an empty status returns items in every status. Used by the
+// dashboard API, which (unlike the /actions Telegram command) needs to show
+// the full lifecycle of a chat's action items, not just the open ones.
+func (s *Services) ListActionItems(ctx context.Context, chatID int64, status string) ([]model.ActionItem, error) {
+	return s.repo.ListActionItems(ctx, chatID, status)
+}
+
+// UpdateActionItemStatus sets an action item's status to any allowed value.
+// Used by the dashboard API's PATCH endpoint; the Telegram /done command
+// still uses the narrower MarkActionItemDone.
+func (s *Services) UpdateActionItemStatus(ctx context.Context, id int64, status string) error {
+	return s.repo.UpdateActionItemStatus(ctx, id, status)
+}
+
+// GetActionItem loads a single action item by ID.
+func (s *Services) GetActionItem(ctx context.Context, id int64) (model.ActionItem, error) {
+	return s.repo.GetActionItem(ctx, id)
+}
+
+// ListSummaries returns the most recent daily summaries for a chat.
+func (s *Services) ListSummaries(ctx context.Context, chatID int64, limit int) ([]model.DailySummary, error) {
+	return s.repo.ListSummaries(ctx, chatID, limit)
 }
 
 // RunDailySummaryScheduler runs a minute-based scheduler for configured daily summary time.
@@ -396,6 +479,10 @@ func (s *Services) exportSummaryToNotion(ctx context.Context, summary model.Dail
 	}
 	if !cfg.Configured {
 		return nil
+	}
+	cfg, err = s.decryptNotionToken(cfg)
+	if err != nil {
+		return err
 	}
 	return s.notionClient.CreateDailySummaryPage(ctx, cfg, summary, chatName)
 }

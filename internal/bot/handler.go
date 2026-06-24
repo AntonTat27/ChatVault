@@ -28,9 +28,10 @@ const (
 	telegramCommandExport    = "/export"
 	telegramCommandNotion    = "/notion"
 	telegramCommandSearch    = "/search"
+	telegramCommandDashboard = "/dashboard"
 	processingSummaryMessage = "Generating summary... I will post it shortly."
 	processingVoiceMessage   = "Voice received. I am transcribing and tagging it now."
-	setupInstructionsMessage = "ChatVault is active. Commands: /summary /ideas /decisions /actions /export /search /semantic-search"
+	setupInstructionsMessage = "ChatVault is active. Commands: /summary /ideas /decisions /actions /export /search /semantic-search /dashboard"
 	maxNotionArgCount        = 3
 	reqTimeoutSeconds        = 30
 )
@@ -44,17 +45,21 @@ var (
 
 // Handler wires Telegram update handling with ChatVault services.
 type Handler struct {
-	services      *service.Services
-	httpClient    *http.Client
-	telegramToken string
+	services         *service.Services
+	httpClient       *http.Client
+	telegramToken    string
+	dashboardBaseURL string
 }
 
-// NewHandler creates a message handler instance.
-func NewHandler(services *service.Services, telegramToken string) *Handler {
+// NewHandler creates a message handler instance. dashboardBaseURL may be
+// empty (e.g. when the dashboard API isn't deployed yet); /dashboard then
+// replies with a setup note instead of a broken link.
+func NewHandler(services *service.Services, telegramToken string, dashboardBaseURL string) *Handler {
 	return &Handler{
-		services:      services,
-		httpClient:    &http.Client{Timeout: reqTimeoutSeconds * time.Second},
-		telegramToken: telegramToken,
+		services:         services,
+		httpClient:       &http.Client{Timeout: reqTimeoutSeconds * time.Second},
+		telegramToken:    telegramToken,
+		dashboardBaseURL: dashboardBaseURL,
 	}
 }
 
@@ -66,10 +71,12 @@ func (h *Handler) RegisterHandlers(b *bot.Bot) {
 	b.RegisterHandler(bot.HandlerTypeMessageText, telegramCommandDecisions, bot.MatchTypeExact, h.handleDecisions)
 	b.RegisterHandler(bot.HandlerTypeMessageText, telegramCommandActions, bot.MatchTypeExact, h.handleActions)
 	b.RegisterHandler(bot.HandlerTypeMessageText, telegramCommandExport, bot.MatchTypeExact, h.handleExport)
+	b.RegisterHandler(bot.HandlerTypeMessageText, telegramCommandNotion, bot.MatchTypeExact, h.handleNotionDeepLink)
 	b.RegisterHandlerRegexp(bot.HandlerTypeMessageText, notionCommandRegexp, h.handleNotion)
 	b.RegisterHandlerRegexp(bot.HandlerTypeMessageText, doneCommandRegexp, h.handleDone)
 	b.RegisterHandlerRegexp(bot.HandlerTypeMessageText, searchCommandRegexp, h.handleSearch)
 	b.RegisterHandlerRegexp(bot.HandlerTypeMessageText, semanticSearchCommandRegexp, h.handleSemanticSearch)
+	b.RegisterHandler(bot.HandlerTypeMessageText, telegramCommandDashboard, bot.MatchTypeExact, h.handleDashboard)
 }
 
 // DefaultHandler stores every incoming message and triggers async processing.
@@ -221,7 +228,27 @@ func (h *Handler) handleExport(ctx context.Context, b *bot.Bot, update *models.U
 	h.replyText(ctx, b, update, "Summary exported to Notion.")
 }
 
-// handleNotion configures Notion token and database ID for the chat.
+// handleNotionDeepLink replies with a link to the dashboard's Notion
+// integration page, which drives the OAuth connection flow. This is the
+// preferred entry point now; the plaintext <token> <database_id> form below
+// still works but is being phased out since it requires sharing a raw
+// internal integration token in a group chat.
+func (h *Handler) handleNotionDeepLink(ctx context.Context, b *bot.Bot, update *models.Update) {
+	if update.Message == nil {
+		return
+	}
+	if h.dashboardBaseURL == "" {
+		h.replyText(ctx, b, update, "Usage: /notion <token> <database_id>")
+		return
+	}
+	link := fmt.Sprintf("%s/dashboard/chats/%d/integrations", strings.TrimRight(h.dashboardBaseURL, "/"), update.Message.Chat.ID)
+	h.replyText(ctx, b, update, "Connect Notion from the dashboard: "+link)
+}
+
+// handleNotion configures Notion token and database ID for the chat using
+// the legacy plaintext form. Deprecated in favor of handleNotionDeepLink's
+// OAuth flow, which avoids pasting a raw integration token into a group chat;
+// kept working for chats that haven't moved to the dashboard yet.
 func (h *Handler) handleNotion(ctx context.Context, b *bot.Bot, update *models.Update) {
 	if update.Message == nil {
 		return
@@ -236,7 +263,22 @@ func (h *Handler) handleNotion(ctx context.Context, b *bot.Bot, update *models.U
 		h.replyText(ctx, b, update, "Notion configuration failed.")
 		return
 	}
-	h.replyText(ctx, b, update, "Notion integration connected.")
+	h.replyText(ctx, b, update, "Notion integration connected. Note: this method is deprecated -- run /notion with no arguments to connect via the dashboard instead.")
+}
+
+// handleDashboard replies with a deep link to this chat's web dashboard,
+// which is how a Telegram user discovers their chat_id for the dashboard's
+// login flow without it being able to enumerate a user's chats itself.
+func (h *Handler) handleDashboard(ctx context.Context, b *bot.Bot, update *models.Update) {
+	if update.Message == nil {
+		return
+	}
+	if h.dashboardBaseURL == "" {
+		h.replyText(ctx, b, update, "The web dashboard isn't set up yet.")
+		return
+	}
+	link := fmt.Sprintf("%s/login?chat_id=%d", strings.TrimRight(h.dashboardBaseURL, "/"), update.Message.Chat.ID)
+	h.replyText(ctx, b, update, "Open this chat's dashboard: "+link)
 }
 
 // handleSearch performs a full-text search for messages matching the query.

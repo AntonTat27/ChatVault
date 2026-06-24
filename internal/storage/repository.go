@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -217,6 +218,32 @@ func (r *Repository) GetSummary(ctx context.Context, chatID int64, dateUTC strin
 	return rows[0].toSummary(chatID, dateUTC), nil
 }
 
+// ListSummaries returns the most recent daily summaries for a chat, newest first.
+func (r *Repository) ListSummaries(ctx context.Context, chatID int64, limit int) ([]model.DailySummary, error) {
+	query := url.Values{
+		"chat_id": []string{fmt.Sprintf("eq.%d", chatID)},
+		"order":   []string{"summary_date_utc.desc"},
+		"limit":   []string{fmt.Sprintf("%d", limit)},
+		"select":  []string{"summary_date_utc,summary_text,decisions,action_items,ideas,open_questions,message_count,created_at"},
+	}
+	data, _, err := r.doRequest(ctx, http.MethodGet, tableSummaries, query, nil, "")
+	if err != nil {
+		return nil, err
+	}
+	var rows []struct {
+		summaryRow
+		SummaryDateUTC string `json:"summary_date_utc"`
+	}
+	if err := json.Unmarshal(data, &rows); err != nil {
+		return nil, err
+	}
+	summaries := make([]model.DailySummary, 0, len(rows))
+	for _, row := range rows {
+		summaries = append(summaries, row.summaryRow.toSummary(chatID, row.SummaryDateUTC))
+	}
+	return summaries, nil
+}
+
 // ListMessagesByTagSince returns tagged messages for a time window.
 func (r *Repository) ListMessagesByTagSince(ctx context.Context, chatID int64, aiTag string, since time.Time) ([]model.Message, error) {
 	query := url.Values{
@@ -287,20 +314,29 @@ func (r *Repository) SaveNotionConfig(ctx context.Context, chatID int64, token s
 	return err
 }
 
-// GetNotionConfig retrieves Notion settings for a chat.
+// GetNotionConfig retrieves Notion settings for a chat. TokenEncrypted is
+// returned as raw ciphertext; decrypting it is the caller's responsibility
+// (this package has no access to NOTION_ENCRYPTION_KEY).
 func (r *Repository) GetNotionConfig(ctx context.Context, chatID int64) (model.NotionConfig, error) {
 	query := url.Values{
 		"chat_id": []string{fmt.Sprintf("eq.%d", chatID)},
-		"select":  []string{"notion_token,notion_database_id,updated_at"},
+		"select":  []string{"notion_token,notion_token_encrypted,notion_database_id,oauth_workspace_id,oauth_workspace_name,updated_at"},
 	}
 	data, _, err := r.doRequest(ctx, http.MethodGet, tableNotionConfig, query, nil, "")
 	if err != nil {
 		return model.NotionConfig{}, err
 	}
+	// notion_token_encrypted is a bytea column. PostgREST renders bytea as
+	// Postgres's own "\x<hex>" text format, not base64 -- unmarshaling it
+	// straight into a []byte field would have Go's json package try (and
+	// fail) to base64-decode it. Decode it ourselves via decodeBytea instead.
 	var rows []struct {
-		Token      string    `json:"notion_token"`
-		DatabaseID string    `json:"notion_database_id"`
-		UpdatedAt  time.Time `json:"updated_at"`
+		Token              string    `json:"notion_token"`
+		TokenEncrypted     string    `json:"notion_token_encrypted"`
+		DatabaseID         string    `json:"notion_database_id"`
+		OAuthWorkspaceID   string    `json:"oauth_workspace_id"`
+		OAuthWorkspaceName string    `json:"oauth_workspace_name"`
+		UpdatedAt          time.Time `json:"updated_at"`
 	}
 	if err := json.Unmarshal(data, &rows); err != nil {
 		return model.NotionConfig{}, err
@@ -308,14 +344,51 @@ func (r *Repository) GetNotionConfig(ctx context.Context, chatID int64) (model.N
 	if len(rows) == 0 {
 		return model.NotionConfig{}, sql.ErrNoRows
 	}
-	cfg := model.NotionConfig{
-		ChatID:     chatID,
-		Token:      rows[0].Token,
-		DatabaseID: rows[0].DatabaseID,
-		UpdatedAt:  rows[0].UpdatedAt,
+	tokenEncrypted, err := decodeBytea(rows[0].TokenEncrypted)
+	if err != nil {
+		return model.NotionConfig{}, fmt.Errorf("decode notion_token_encrypted: %w", err)
 	}
-	cfg.Configured = cfg.Token != "" && cfg.DatabaseID != ""
+	cfg := model.NotionConfig{
+		ChatID:             chatID,
+		Token:              rows[0].Token,
+		TokenEncrypted:     tokenEncrypted,
+		DatabaseID:         rows[0].DatabaseID,
+		OAuthWorkspaceID:   rows[0].OAuthWorkspaceID,
+		OAuthWorkspaceName: rows[0].OAuthWorkspaceName,
+		UpdatedAt:          rows[0].UpdatedAt,
+	}
+	cfg.Configured = (cfg.Token != "" || len(cfg.TokenEncrypted) > 0) && cfg.DatabaseID != ""
 	return cfg, nil
+}
+
+// SaveNotionOAuthConfig stores an OAuth-derived Notion connection: an
+// encrypted access token and workspace metadata. The database ID is set
+// separately once the user picks one from the post-OAuth database picker
+// (see SetNotionDatabaseID), since Notion's OAuth grant is workspace-scoped
+// and does not include a database selection.
+func (r *Repository) SaveNotionOAuthConfig(ctx context.Context, chatID int64, tokenEncrypted []byte, workspaceID string, workspaceName string) error {
+	payload := map[string]any{
+		"chat_id":                chatID,
+		"notion_token_encrypted": encodeBytea(tokenEncrypted),
+		"oauth_workspace_id":     workspaceID,
+		"oauth_workspace_name":   workspaceName,
+		"updated_at":             time.Now().UTC().Format(time.RFC3339),
+	}
+	query := url.Values{"on_conflict": []string{"chat_id"}}
+	_, _, err := r.doRequest(ctx, http.MethodPost, tableNotionConfig, query, payload, "resolution=merge-duplicates")
+	return err
+}
+
+// SetNotionDatabaseID records the database the user picked after an OAuth
+// connection, without touching the stored token.
+func (r *Repository) SetNotionDatabaseID(ctx context.Context, chatID int64, databaseID string) error {
+	payload := map[string]any{
+		"notion_database_id": databaseID,
+		"updated_at":         time.Now().UTC().Format(time.RFC3339),
+	}
+	query := url.Values{"chat_id": []string{fmt.Sprintf("eq.%d", chatID)}}
+	_, _, err := r.doRequest(ctx, http.MethodPatch, tableNotionConfig, query, payload, "return=minimal")
+	return err
 }
 
 // CreateActionItem creates a new action item row in the database.
@@ -363,6 +436,28 @@ func (r *Repository) ListActionItems(ctx context.Context, chatID int64, status s
 		return nil, err
 	}
 	return hydrateActionItems(rows), nil
+}
+
+// GetActionItem loads a single action item by ID, used by the dashboard API
+// to confirm a chat membership check before allowing a status update.
+func (r *Repository) GetActionItem(ctx context.Context, id int64) (model.ActionItem, error) {
+	query := url.Values{
+		"id":     []string{fmt.Sprintf("eq.%d", id)},
+		"select": []string{"id,chat_id,task,owner,assignee_user_id,status,due_date,created_at"},
+	}
+	data, _, err := r.doRequest(ctx, http.MethodGet, tableActionItems, query, nil, "")
+	if err != nil {
+		return model.ActionItem{}, err
+	}
+	var rows []actionItemRow
+	if err := json.Unmarshal(data, &rows); err != nil {
+		return model.ActionItem{}, err
+	}
+	if len(rows) == 0 {
+		return model.ActionItem{}, sql.ErrNoRows
+	}
+	items := hydrateActionItems(rows)
+	return items[0], nil
 }
 
 // UpdateActionItemStatus updates the status of an action item by ID.
@@ -439,6 +534,23 @@ type actionItemRow struct {
 	Status         string    `json:"status"`
 	DueDate        *string   `json:"due_date"`
 	CreatedAt      time.Time `json:"created_at"`
+}
+
+// encodeBytea renders bytes as Postgres's "\x<hex>" bytea text input format,
+// the format PostgREST/PostgreSQL expect over the REST API -- not base64,
+// which is what encoding/json would otherwise produce for a raw []byte field.
+func encodeBytea(b []byte) string {
+	return "\\x" + hex.EncodeToString(b)
+}
+
+// decodeBytea reverses encodeBytea. An empty string (no row, or a NULL
+// column) decodes to a nil slice rather than an error.
+func decodeBytea(s string) ([]byte, error) {
+	if s == "" {
+		return nil, nil
+	}
+	s = strings.TrimPrefix(s, "\\x")
+	return hex.DecodeString(s)
 }
 
 func (s summaryRow) toSummary(chatID int64, dateUTC string) model.DailySummary {
