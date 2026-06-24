@@ -27,9 +27,29 @@ const (
 // PostMessageFn defines a callback for posting text back to Telegram.
 type PostMessageFn func(ctx context.Context, chatID int64, text string) error
 
+// summaryRepository defines the repository methods Services depends on for
+// summary generation and action item tracking. *storage.Repository satisfies
+// this implicitly; tests can substitute a fake to assert call behavior.
+type summaryRepository interface {
+	UpsertChat(ctx context.Context, chatID int64, chatTitle string, summaryHour int, summaryMinute int) error
+	InsertMessage(ctx context.Context, msg model.Message) (int64, error)
+	UpdateClassification(ctx context.Context, chatID int64, messageID int, result model.ClassificationResult) error
+	SaveVoiceProcessing(ctx context.Context, chatID int64, messageID int, transcript string, classification model.ClassificationResult) error
+	ListMessagesForDate(ctx context.Context, chatID int64, dateUTC time.Time) ([]model.Message, error)
+	SaveSummary(ctx context.Context, summary model.DailySummary) (int64, error)
+	GetSummary(ctx context.Context, chatID int64, dateUTC string) (model.DailySummary, error)
+	ListMessagesByTagSince(ctx context.Context, chatID int64, aiTag string, since time.Time) ([]model.Message, error)
+	ListActiveChatsForSchedule(ctx context.Context, hour int, minute int) ([]int64, error)
+	SaveNotionConfig(ctx context.Context, chatID int64, token string, databaseID string) error
+	GetNotionConfig(ctx context.Context, chatID int64) (model.NotionConfig, error)
+	CreateActionItem(ctx context.Context, item model.ActionItem) error
+	ListActionItems(ctx context.Context, chatID int64, status string) ([]model.ActionItem, error)
+	UpdateActionItemStatus(ctx context.Context, id int64, status string) error
+}
+
 // Services coordinates storage, AI processing, summary generation, and integrations.
 type Services struct {
-	repo          *storage.Repository
+	repo          summaryRepository
 	gemini        *ai.GeminiClient
 	transcriber   *ai.GeminiTranscribeClient
 	storageClient *supabase.StorageClient
@@ -141,9 +161,12 @@ func (s *Services) GenerateSummaryForChat(ctx context.Context, chatID int64, dat
 	summary.ChatID = chatID
 	summary.SummaryDateUTC = dateUTC.UTC().Format(dailySummaryDateLayout)
 	summary.MessageCount = len(messages)
-	if err := s.repo.SaveSummary(ctx, summary); err != nil {
+	summaryID, err := s.repo.SaveSummary(ctx, summary)
+	if err != nil {
 		return err
 	}
+
+	s.createActionItemsForSummary(ctx, chatID, summaryID, summary.ActionItems)
 
 	if err := post(ctx, chatID, FormatSummaryMessage(summary)); err != nil {
 		return err
@@ -152,6 +175,27 @@ func (s *Services) GenerateSummaryForChat(ctx context.Context, chatID int64, dat
 		logProcessingError(chatID, 0, "notion_export", err)
 	}
 	return nil
+}
+
+// createActionItemsForSummary inserts a durable action_items row for each item
+// extracted during summary generation. Failures are logged but do not abort
+// summary delivery, since the JSONB blob on the summary remains the source of
+// truth for the Telegram message itself.
+func (s *Services) createActionItemsForSummary(ctx context.Context, chatID int64, summaryID int64, items []model.ActionItem) {
+	for _, item := range items {
+		record := model.ActionItem{
+			ChatID:         chatID,
+			SummaryID:      &summaryID,
+			Task:           item.Task,
+			Owner:          item.Owner,
+			Status:         "open",
+			DueDate:        item.DueDate,
+			AssigneeUserID: nil,
+		}
+		if err := s.repo.CreateActionItem(ctx, record); err != nil {
+			logProcessingError(chatID, 0, "action_item_create", err)
+		}
+	}
 }
 
 // GenerateSummaryAsync queues summary generation and sends completion/failure follow-up.

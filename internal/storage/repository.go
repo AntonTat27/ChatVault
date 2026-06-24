@@ -146,8 +146,8 @@ func (r *Repository) ListMessagesForDate(ctx context.Context, chatID int64, day 
 	return hydrateMessages(rows), nil
 }
 
-// SaveSummary persists a generated summary payload.
-func (r *Repository) SaveSummary(ctx context.Context, summary model.DailySummary) error {
+// SaveSummary persists a generated summary payload and returns the stored record ID.
+func (r *Repository) SaveSummary(ctx context.Context, summary model.DailySummary) (int64, error) {
 	summary = normalizeDailySummary(summary)
 	payload := map[string]any{
 		"chat_id":          summary.ChatID,
@@ -161,9 +161,22 @@ func (r *Repository) SaveSummary(ctx context.Context, summary model.DailySummary
 	}
 	query := url.Values{
 		"on_conflict": []string{"chat_id,summary_date_utc"},
+		"select":      []string{"id"},
 	}
-	_, _, err := r.doRequest(ctx, http.MethodPost, tableSummaries, query, payload, "resolution=merge-duplicates")
-	return err
+	data, _, err := r.doRequest(ctx, http.MethodPost, tableSummaries, query, payload, "resolution=merge-duplicates,return=representation")
+	if err != nil {
+		return 0, err
+	}
+	var rows []struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(data, &rows); err != nil {
+		return 0, err
+	}
+	if len(rows) == 0 {
+		return 0, sql.ErrNoRows
+	}
+	return rows[0].ID, nil
 }
 
 // normalizeDailySummary ensures nil slice fields are encoded as empty JSON arrays, not null.
@@ -308,14 +321,14 @@ func (r *Repository) GetNotionConfig(ctx context.Context, chatID int64) (model.N
 // CreateActionItem creates a new action item row in the database.
 func (r *Repository) CreateActionItem(ctx context.Context, item model.ActionItem) error {
 	payload := map[string]any{
-		"chat_id":          item.ChatID,
+		"chat_id":           item.ChatID,
 		"source_message_id": nullablePtr64(item.SourceMessageID),
-		"summary_id":       nullablePtr64(item.SummaryID),
-		"task":             item.Task,
-		"owner":            nullablePtr(item.Owner),
-		"assignee_user_id": nullablePtr64(item.AssigneeUserID),
-		"status":           item.Status,
-		"due_date":         nullablePtr(item.DueDate),
+		"summary_id":        nullablePtr64(item.SummaryID),
+		"task":              item.Task,
+		"owner":             nullablePtr(item.Owner),
+		"assignee_user_id":  nullablePtr64(item.AssigneeUserID),
+		"status":            item.Status,
+		"due_date":          nullablePtr(item.DueDate),
 	}
 	_, _, err := r.doRequest(ctx, http.MethodPost, tableActionItems, url.Values{}, payload, "")
 	return err
@@ -418,13 +431,13 @@ type summaryRow struct {
 }
 
 type actionItemRow struct {
-	ID             int64   `json:"id"`
-	ChatID         int64   `json:"chat_id"`
-	Task           string  `json:"task"`
-	Owner          *string `json:"owner"`
-	AssigneeUserID *int64  `json:"assignee_user_id"`
-	Status         string  `json:"status"`
-	DueDate        *string `json:"due_date"`
+	ID             int64     `json:"id"`
+	ChatID         int64     `json:"chat_id"`
+	Task           string    `json:"task"`
+	Owner          *string   `json:"owner"`
+	AssigneeUserID *int64    `json:"assignee_user_id"`
+	Status         string    `json:"status"`
+	DueDate        *string   `json:"due_date"`
 	CreatedAt      time.Time `json:"created_at"`
 }
 
