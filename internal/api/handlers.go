@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -64,13 +65,13 @@ func NewHandler(services *service.Services, repo *storage.Repository, telegramBo
 }
 
 type telegramLoginPayload struct {
-	ID        string `json:"id"`
-	FirstName string `json:"first_name"`
-	LastName  string `json:"last_name"`
-	Username  string `json:"username"`
-	PhotoURL  string `json:"photo_url"`
-	AuthDate  string `json:"auth_date"`
-	Hash      string `json:"hash"`
+	ID        json.Number `json:"id"`
+	FirstName string      `json:"first_name"`
+	LastName  string      `json:"last_name"`
+	Username  string      `json:"username"`
+	PhotoURL  string      `json:"photo_url"`
+	AuthDate  json.Number `json:"auth_date"`
+	Hash      string      `json:"hash"`
 }
 
 // handleTelegramCallback verifies a Telegram Login Widget payload, upserts
@@ -78,18 +79,22 @@ type telegramLoginPayload struct {
 func (h *Handler) handleTelegramCallback(w http.ResponseWriter, r *http.Request) {
 	var payload telegramLoginPayload
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		log.Printf("ERROR: failed to decode telegram payload: %v, content-type: %s", err, r.Header.Get("Content-Type"))
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
-	if payload.ID == "" || payload.AuthDate == "" || payload.Hash == "" {
+	idStr := string(payload.ID)
+	authDateStr := string(payload.AuthDate)
+	if idStr == "" || authDateStr == "" || payload.Hash == "" {
+		log.Printf("ERROR: missing required fields - id: '%s', auth_date: '%s', hash: '%s'", idStr, authDateStr, payload.Hash)
 		http.Error(w, "missing required login fields", http.StatusBadRequest)
 		return
 	}
 
 	fields := map[string]string{
-		"id":         payload.ID,
+		"id":         idStr,
 		"first_name": payload.FirstName,
-		"auth_date":  payload.AuthDate,
+		"auth_date":  authDateStr,
 	}
 	if payload.LastName != "" {
 		fields["last_name"] = payload.LastName
@@ -105,12 +110,12 @@ func (h *Handler) handleTelegramCallback(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "invalid login signature", http.StatusUnauthorized)
 		return
 	}
-	if !auth.IsAuthDateFresh(payload.AuthDate) {
+	if !auth.IsAuthDateFresh(authDateStr) {
 		http.Error(w, "login payload expired", http.StatusUnauthorized)
 		return
 	}
 
-	telegramUserID, err := strconv.ParseInt(payload.ID, 10, 64)
+	telegramUserID, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil {
 		http.Error(w, "invalid telegram user id", http.StatusBadRequest)
 		return
