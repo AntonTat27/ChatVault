@@ -1,0 +1,12 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <script>
+    const pathSegments = location.pathname.split('/').filter(Boolean);
+    const baseIndex = pathSegments.indexOf('ChatVault');
+    const pathAfterBase = '/' + pathSegments.slice(baseIndex + 1).join('/');
+    sessionStorage.redirect = pathAfterBase;
+    location.replace(location.pathname.split('/').slice(0, baseIndex + 2).join('/') + '/index.html');
+  </script>
+</head>
+</html>
