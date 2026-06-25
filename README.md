@@ -85,12 +85,19 @@ The Telegram Login Widget requires the bot's domain to be registered first via `
 
 ## Docker
 
-Build and run:
+Two Dockerfiles, one per binary:
 
 ```bash
-docker build -t chatvault .
+# Telegram bot (cmd/chatvault)
+docker build -t chatvault -f Dockerfile .
 docker run --rm --env-file .env chatvault
+
+# Dashboard API (cmd/chatvault-api)
+docker build -t chatvault-api -f Dockerfile.api .
+docker run --rm --env-file .env -p 8081:8081 chatvault-api
 ```
+
+The dashboard API binds to `$PORT` if set (falls back to `$API_PORT`, then `:8081`) so it works as a Heroku web dyno, which assigns its own port at runtime.
 
 ## Telegram commands
 
@@ -123,6 +130,14 @@ When configured, daily summary export creates a page:
 - Body sections: Summary, Decisions, Action Items (checkbox items), Ideas, Open Questions
 
 ## Deployment notes
+
+### Heroku
+
+`.github/workflows/deploy-heroku.yml` deploys both binaries to a single Heroku app on push to `main`: `Dockerfile` (the bot) is released as the `worker` process type, `Dockerfile.api` (the dashboard API) as the `web` process type.
+
+Required GitHub Actions secrets: `HEROKU_API_KEY`, `HEROKU_EMAIL`, `HEROKU_APP_NAME`.
+
+Set as Heroku config vars on the app (`heroku config:set KEY=value --app=<name>`), in addition to the bot's required vars: `SESSION_SECRET`, `ALLOWED_ORIGINS` (the deployed dashboard frontend's origin), `DASHBOARD_BASE_URL`, and the Notion OAuth vars if onboarding is enabled. Don't set `API_PORT` — Heroku assigns `$PORT` at runtime and the API binds to it automatically.
 
 ### Railway
 1. Create a new Railway service from this repository.

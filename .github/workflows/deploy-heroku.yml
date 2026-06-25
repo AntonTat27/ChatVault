@@ -21,13 +21,18 @@ jobs:
         run: |
           echo ${{ secrets.HEROKU_API_KEY }} | docker login --username=${{ secrets.HEROKU_EMAIL }} --password-stdin registry.heroku.com
 
-      - name: Build Docker image
+      - name: Build worker image (Telegram bot)
         run: |
-          docker build -t registry.heroku.com/${{ secrets.HEROKU_APP_NAME }}/worker .
+          docker build -f Dockerfile -t registry.heroku.com/${{ secrets.HEROKU_APP_NAME }}/worker .
 
-      - name: Push to Heroku
+      - name: Build web image (dashboard API)
+        run: |
+          docker build -f Dockerfile.api -t registry.heroku.com/${{ secrets.HEROKU_APP_NAME }}/web .
+
+      - name: Push images to Heroku
         run: |
           docker push registry.heroku.com/${{ secrets.HEROKU_APP_NAME }}/worker
+          docker push registry.heroku.com/${{ secrets.HEROKU_APP_NAME }}/web
 
       - name: Set Heroku stack to container
         run: |
@@ -39,4 +44,4 @@ jobs:
         env:
           HEROKU_API_KEY: ${{ secrets.HEROKU_API_KEY }}
         run: |
-          heroku container:release worker --app=${{ secrets.HEROKU_APP_NAME }}
+          heroku container:release worker web --app=${{ secrets.HEROKU_APP_NAME }}
