@@ -528,7 +528,14 @@ func (s *Services) runWorker(ctx context.Context) {
 			if !ok {
 				return
 			}
-			job(ctx)
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						log.Printf("ERROR: job panic: %v", r)
+					}
+				}()
+				job(ctx)
+			}()
 		}
 	}
 }

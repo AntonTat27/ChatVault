@@ -16,14 +16,14 @@ async function request(url, options = {}) {
 }
 
 export function telegramLogin(payload) {
-  return request(`${AUTH_BASE_URL}/telegram/callback`, {
+  return request(`${AUTH_BASE_URL}/auth/telegram/callback`, {
     method: 'POST',
     body: JSON.stringify(payload),
   })
 }
 
 export function logout() {
-  return request(`${AUTH_BASE_URL}/logout`, { method: 'POST' })
+  return request(`${AUTH_BASE_URL}/auth/logout`, { method: 'POST' })
 }
 
 export function listChats() {
@@ -75,5 +75,5 @@ export function setNotionDatabase(chatId, databaseId) {
 // path, keeps this in sync with telegramLogin/logout instead of letting a
 // caller independently (and possibly wrongly) compute an API origin.
 export function notionOAuthStartHref(chatId) {
-  return new URL(`${AUTH_BASE_URL}/notion/start/${chatId}`, window.location.origin).toString()
+  return new URL(`${AUTH_BASE_URL}/auth/notion/start/${chatId}`, window.location.origin).toString()
 }
