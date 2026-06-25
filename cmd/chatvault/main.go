@@ -8,13 +8,11 @@ import (
 	"syscall"
 
 	telegrambot "github.com/go-telegram/bot"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"chatvault/internal/ai"
 	bothandler "chatvault/internal/bot"
 	"chatvault/internal/config"
 	"chatvault/internal/crypto"
-	"chatvault/internal/db"
 	"chatvault/internal/notion"
 	"chatvault/internal/service"
 	"chatvault/internal/storage"
@@ -38,16 +36,6 @@ func main() {
 
 	repo := storage.NewRepository(cfg.SupabaseURL, cfg.SupabaseSecretKey, cfg.HTTPTimeout)
 
-	var dbPool *pgxpool.Pool
-	if cfg.DatabaseURL != "" {
-		var err error
-		dbPool, err = db.NewPool(ctx, cfg.DatabaseURL)
-		if err != nil {
-			log.Fatalf("database pool init failed: %v", err)
-		}
-		defer dbPool.Close()
-	}
-
 	// Create Gemini client with separate models for classification and summarization.
 	geminiClient := ai.NewGeminiClient(cfg.GeminiAPIKey, cfg.GeminiClassificationModel, cfg.GeminiSummaryModel, cfg.GeminiEmbeddingModel, cfg.HTTPTimeout)
 	transcriberClient := ai.NewGeminiTranscribeClient(cfg.GeminiAPIKey, cfg.GeminiTranscribeModel, cfg.HTTPTimeout)
@@ -62,7 +50,7 @@ func main() {
 		}
 	}
 
-	services := service.NewServices(ctx, repo, geminiClient, transcriberClient, storageClient, notionClient, notionCipher, dbPool, cfg.GeminiEmbeddingModel, cfg.DailySummaryHourUTC, cfg.DailySummaryMinuteUTC)
+	services := service.NewServices(ctx, repo, geminiClient, transcriberClient, storageClient, notionClient, notionCipher, cfg.GeminiEmbeddingModel, cfg.DailySummaryHourUTC, cfg.DailySummaryMinuteUTC)
 	defer services.Close()
 
 	handler := bothandler.NewHandler(services, cfg.TelegramBotToken, cfg.DashboardBaseURL)

@@ -9,9 +9,8 @@ import (
 
 	tgbot "github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
-	"github.com/jackc/pgx/v5/pgxpool"
 
-	"chatvault/internal/db"
+	"chatvault/internal/storage"
 )
 
 type contextKey string
@@ -41,7 +40,7 @@ func ChatIDFromContext(ctx context.Context) (int64, bool) {
 
 // RequireAuth validates the session cookie against dashboard_sessions and
 // puts the authenticated Telegram user ID on the request context.
-func RequireAuth(pool *pgxpool.Pool) func(http.Handler) http.Handler {
+func RequireAuth(repo *storage.Repository) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			cookie, err := r.Cookie(SessionCookieName)
@@ -49,9 +48,9 @@ func RequireAuth(pool *pgxpool.Pool) func(http.Handler) http.Handler {
 				http.Error(w, "not authenticated", http.StatusUnauthorized)
 				return
 			}
-			userID, err := db.GetDashboardSession(r.Context(), pool, HashToken(cookie.Value))
+			userID, err := repo.GetDashboardSession(r.Context(), HashToken(cookie.Value))
 			if err != nil {
-				if errors.Is(err, db.ErrSessionNotFound) {
+				if errors.Is(err, storage.ErrSessionNotFound) {
 					http.Error(w, "session expired", http.StatusUnauthorized)
 					return
 				}
@@ -69,7 +68,7 @@ func RequireAuth(pool *pgxpool.Pool) func(http.Handler) http.Handler {
 // "id" path value. It trusts a cached chat_members row for
 // chatMembershipCacheTTL before re-checking the Bot API, and the caller can
 // force a refresh via ?refresh=true.
-func RequireChatMembership(telegramBot *tgbot.Bot, pool *pgxpool.Pool) func(http.Handler) http.Handler {
+func RequireChatMembership(telegramBot *tgbot.Bot, repo *storage.Repository) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			userID, ok := UserIDFromContext(r.Context())
@@ -84,7 +83,7 @@ func RequireChatMembership(telegramBot *tgbot.Bot, pool *pgxpool.Pool) func(http
 			}
 
 			forceRefresh := r.URL.Query().Get("refresh") == "true"
-			role, ok, err := VerifyChatMembership(r.Context(), telegramBot, pool, chatID, userID, forceRefresh)
+			role, ok, err := VerifyChatMembership(r.Context(), telegramBot, repo, chatID, userID, forceRefresh)
 			if err != nil {
 				http.Error(w, "membership verification failed", http.StatusInternalServerError)
 				return
@@ -107,14 +106,14 @@ func RequireChatMembership(telegramBot *tgbot.Bot, pool *pgxpool.Pool) func(http
 // doesn't carry chat_id in the URL path (and so can't use the middleware
 // directly, e.g. PATCH /api/action-items/{id} or the Notion OAuth callback)
 // enforce the same recency policy instead of trusting a cache row forever.
-func VerifyChatMembership(ctx context.Context, telegramBot *tgbot.Bot, pool *pgxpool.Pool, chatID int64, userID int64, forceRefresh bool) (role string, ok bool, err error) {
-	role, verifiedAt, found, err := db.GetChatMemberCache(ctx, pool, chatID, userID)
+func VerifyChatMembership(ctx context.Context, telegramBot *tgbot.Bot, repo *storage.Repository, chatID int64, userID int64, forceRefresh bool) (role string, ok bool, err error) {
+	role, verifiedAt, found, err := repo.GetChatMemberCache(ctx, chatID, userID)
 	if err != nil {
 		return "", false, err
 	}
 
 	if !found || forceRefresh || time.Since(verifiedAt) > chatMembershipCacheTTL {
-		role, err = verifyMembershipViaBotAPI(ctx, telegramBot, pool, chatID, userID)
+		role, err = verifyMembershipViaBotAPI(ctx, telegramBot, repo, chatID, userID)
 		if err != nil {
 			return "", false, err
 		}
@@ -125,7 +124,7 @@ func VerifyChatMembership(ctx context.Context, telegramBot *tgbot.Bot, pool *pgx
 // verifyMembershipViaBotAPI calls Telegram's getChatMember, updates the
 // chat_members cache, and returns the member's role (empty if they have
 // left or been banned).
-func verifyMembershipViaBotAPI(ctx context.Context, telegramBot *tgbot.Bot, pool *pgxpool.Pool, chatID int64, userID int64) (string, error) {
+func verifyMembershipViaBotAPI(ctx context.Context, telegramBot *tgbot.Bot, repo *storage.Repository, chatID int64, userID int64) (string, error) {
 	member, err := telegramBot.GetChatMember(ctx, &tgbot.GetChatMemberParams{
 		ChatID: chatID,
 		UserID: userID,
@@ -136,10 +135,10 @@ func verifyMembershipViaBotAPI(ctx context.Context, telegramBot *tgbot.Bot, pool
 
 	role := currentRole(member)
 	if role == "" {
-		_ = db.RemoveChatMember(ctx, pool, chatID, userID)
+		_ = repo.RemoveChatMember(ctx, chatID, userID)
 		return "", nil
 	}
-	if err := db.UpsertChatMember(ctx, pool, chatID, userID, role); err != nil {
+	if err := repo.UpsertChatMember(ctx, chatID, userID, role); err != nil {
 		return "", err
 	}
 	return role, nil

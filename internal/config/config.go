@@ -29,12 +29,7 @@ type Config struct {
 	NotionVersion             string
 	DailySummaryHourUTC       int
 	DailySummaryMinuteUTC     int
-	HTTPTimeout               time.Duration
-	// DatabaseURL is the direct Postgres DSN (e.g. Supabase's transaction
-	// pooler connection string) used by internal/db for features needing
-	// transactions/joins/extensions beyond what PostgREST can express.
-	// Optional: only required once a pgx-backed feature is enabled.
-	DatabaseURL string
+	HTTPTimeout time.Duration
 	// Dashboard (cmd/chatvault-api) configuration. Required only to run that binary.
 	SessionSecret    string
 	APIPort          string
@@ -73,7 +68,6 @@ func Load() (Config, error) {
 		DailySummaryHourUTC:       hour,
 		DailySummaryMinuteUTC:     minute,
 		HTTPTimeout:               time.Duration(getEnvInt("HTTP_TIMEOUT_SECONDS", defaultHTTPTimeoutSec)) * time.Second,
-		DatabaseURL:               os.Getenv("DATABASE_URL"),
 		SessionSecret:             os.Getenv("SESSION_SECRET"),
 		APIPort:                   getEnv("API_PORT", ":8081"),
 		AllowedOrigins:            splitAndTrim(os.Getenv("ALLOWED_ORIGINS")),

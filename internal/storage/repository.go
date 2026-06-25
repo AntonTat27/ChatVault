@@ -6,10 +6,13 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,12 +20,41 @@ import (
 )
 
 const (
-	tableChats        = "chats"
-	tableMessages     = "messages"
-	tableSummaries    = "daily_summaries"
-	tableNotionConfig = "notion_configs"
-	tableActionItems  = "action_items"
+	tableChats             = "chats"
+	tableMessages          = "messages"
+	tableSummaries         = "daily_summaries"
+	tableNotionConfig      = "notion_configs"
+	tableActionItems       = "action_items"
+	tableMessageEmbeddings = "message_embeddings"
+	viewMissingEmbeddings  = "messages_missing_embeddings"
+	tableDashboardUsers    = "dashboard_users"
+	tableDashboardSessions = "dashboard_sessions"
+	tableChatMembers       = "chat_members"
+	rpcSearchMessages      = "rpc/search_messages"
+	rpcSemanticSearch      = "rpc/semantic_search_messages"
+
+	// searchQueryLimit is the maximum number of results to return from a search.
+	searchQueryLimit = 50
 )
+
+// ErrSessionNotFound indicates a session token has no matching, unexpired row.
+var ErrSessionNotFound = errors.New("dashboard session not found or expired")
+
+// messageColumns is the column list shared by every endpoint (table, view, or
+// RPC function) that returns rows shaped like the messages table.
+var messageColumns = strings.Join([]string{
+	"id",
+	"chat_id",
+	"message_id",
+	"sender_id",
+	"chat_title",
+	"message_text",
+	"transcript",
+	"ai_tag",
+	"topic_tag",
+	"is_voice",
+	"created_at",
+}, ",")
 
 // Repository provides data access methods for ChatVault via Supabase PostgREST.
 type Repository struct {
@@ -475,6 +507,245 @@ func (r *Repository) UpdateActionItemStatus(ctx context.Context, id int64, statu
 	}
 	_, _, err := r.doRequest(ctx, http.MethodPatch, tableActionItems, query, payload, "return=minimal")
 	return err
+}
+
+// SearchMessages searches for messages matching the query using full-text
+// search, via the search_messages RPC function (migration 007). PostgREST
+// can't order by a computed expression like ts_rank itself, so ranking is
+// done inside the function and exposed as an RPC call.
+func (r *Repository) SearchMessages(ctx context.Context, chatID int64, query string, limit int) ([]model.Message, error) {
+	if limit <= 0 || limit > searchQueryLimit {
+		limit = searchQueryLimit
+	}
+	payload := map[string]any{
+		"p_chat_id": chatID,
+		"p_query":   query,
+		"p_limit":   limit,
+	}
+	data, _, err := r.doRequest(ctx, http.MethodPost, rpcSearchMessages, nil, payload, "")
+	if err != nil {
+		return nil, err
+	}
+	var rows []messageRow
+	if err := json.Unmarshal(data, &rows); err != nil {
+		return nil, err
+	}
+	return hydrateMessages(rows), nil
+}
+
+// SemanticSearchMessages finds messages whose stored embedding is closest to
+// queryEmbedding (pgvector's <-> distance operator), via the
+// semantic_search_messages RPC function (migration 007). PostgREST can't
+// order by vector distance directly, so this is wrapped in a SQL function.
+func (r *Repository) SemanticSearchMessages(ctx context.Context, chatID int64, queryEmbedding []float32, limit int) ([]model.Message, error) {
+	if limit <= 0 || limit > searchQueryLimit {
+		limit = searchQueryLimit
+	}
+	payload := map[string]any{
+		"p_chat_id":         chatID,
+		"p_query_embedding": formatVector(queryEmbedding),
+		"p_limit":           limit,
+	}
+	data, _, err := r.doRequest(ctx, http.MethodPost, rpcSemanticSearch, nil, payload, "")
+	if err != nil {
+		return nil, err
+	}
+	var rows []messageRow
+	if err := json.Unmarshal(data, &rows); err != nil {
+		return nil, err
+	}
+	return hydrateMessages(rows), nil
+}
+
+// UpsertMessageEmbedding stores or replaces the embedding for a message.
+func (r *Repository) UpsertMessageEmbedding(ctx context.Context, messageID int64, chatID int64, values []float32, modelVersion string) error {
+	payload := map[string]any{
+		"message_id":    messageID,
+		"chat_id":       chatID,
+		"embedding":     formatVector(values),
+		"model_version": modelVersion,
+	}
+	query := url.Values{"on_conflict": []string{"message_id"}}
+	_, _, err := r.doRequest(ctx, http.MethodPost, tableMessageEmbeddings, query, payload, "resolution=merge-duplicates")
+	return err
+}
+
+// ListMessagesMissingEmbeddings returns up to limit messages (with id >
+// afterID, ordered by id) that have no row in message_embeddings yet, via
+// the messages_missing_embeddings view (migration 007), which PostgREST
+// exposes for plain filtered GETs just like a table.
+func (r *Repository) ListMessagesMissingEmbeddings(ctx context.Context, afterID int64, limit int) ([]model.Message, error) {
+	query := url.Values{
+		"id":     []string{fmt.Sprintf("gt.%d", afterID)},
+		"order":  []string{"id.asc"},
+		"limit":  []string{strconv.Itoa(limit)},
+		"select": []string{messageColumns},
+	}
+	data, _, err := r.doRequest(ctx, http.MethodGet, viewMissingEmbeddings, query, nil, "")
+	if err != nil {
+		return nil, err
+	}
+	var rows []messageRow
+	if err := json.Unmarshal(data, &rows); err != nil {
+		return nil, err
+	}
+	return hydrateMessages(rows), nil
+}
+
+// UpsertDashboardUser stores or refreshes a Telegram identity that has
+// authenticated through the web dashboard's Telegram Login Widget.
+func (r *Repository) UpsertDashboardUser(ctx context.Context, user model.DashboardUser) error {
+	payload := map[string]any{
+		"telegram_user_id": user.TelegramUserID,
+		"first_name":       user.FirstName,
+		"last_name":        user.LastName,
+		"username":         nullableString(user.Username),
+		"photo_url":        nullableString(user.PhotoURL),
+		"updated_at":       time.Now().UTC().Format(time.RFC3339),
+	}
+	query := url.Values{"on_conflict": []string{"telegram_user_id"}}
+	_, _, err := r.doRequest(ctx, http.MethodPost, tableDashboardUsers, query, payload, "resolution=merge-duplicates")
+	return err
+}
+
+// CreateDashboardSession persists a new session keyed by the sha256 hash of
+// the raw session token (the raw token itself only ever lives in the cookie).
+func (r *Repository) CreateDashboardSession(ctx context.Context, tokenHash string, telegramUserID int64, expiresAt time.Time) error {
+	payload := map[string]any{
+		"token_hash":       tokenHash,
+		"telegram_user_id": telegramUserID,
+		"expires_at":       expiresAt.UTC().Format(time.RFC3339),
+	}
+	_, _, err := r.doRequest(ctx, http.MethodPost, tableDashboardSessions, nil, payload, "")
+	return err
+}
+
+// GetDashboardSession returns the Telegram user ID for a live (unexpired)
+// session, or ErrSessionNotFound if the token is invalid, unknown, or expired.
+func (r *Repository) GetDashboardSession(ctx context.Context, tokenHash string) (int64, error) {
+	query := url.Values{
+		"token_hash": []string{fmt.Sprintf("eq.%s", tokenHash)},
+		"expires_at": []string{fmt.Sprintf("gt.%s", time.Now().UTC().Format(time.RFC3339))},
+		"select":     []string{"telegram_user_id"},
+	}
+	data, _, err := r.doRequest(ctx, http.MethodGet, tableDashboardSessions, query, nil, "")
+	if err != nil {
+		return 0, err
+	}
+	var rows []struct {
+		TelegramUserID int64 `json:"telegram_user_id"`
+	}
+	if err := json.Unmarshal(data, &rows); err != nil {
+		return 0, err
+	}
+	if len(rows) == 0 {
+		return 0, ErrSessionNotFound
+	}
+	return rows[0].TelegramUserID, nil
+}
+
+// DeleteDashboardSession revokes a session immediately (logout).
+func (r *Repository) DeleteDashboardSession(ctx context.Context, tokenHash string) error {
+	query := url.Values{"token_hash": []string{fmt.Sprintf("eq.%s", tokenHash)}}
+	_, _, err := r.doRequest(ctx, http.MethodDelete, tableDashboardSessions, query, nil, "return=minimal")
+	return err
+}
+
+// GetChatMemberCache returns a cached membership verification for a
+// (chat, user) pair, if one exists.
+func (r *Repository) GetChatMemberCache(ctx context.Context, chatID int64, telegramUserID int64) (role string, verifiedAt time.Time, found bool, err error) {
+	query := url.Values{
+		"chat_id":          []string{fmt.Sprintf("eq.%d", chatID)},
+		"telegram_user_id": []string{fmt.Sprintf("eq.%d", telegramUserID)},
+		"select":           []string{"role,verified_at"},
+	}
+	data, _, err := r.doRequest(ctx, http.MethodGet, tableChatMembers, query, nil, "")
+	if err != nil {
+		return "", time.Time{}, false, err
+	}
+	var rows []struct {
+		Role       string    `json:"role"`
+		VerifiedAt time.Time `json:"verified_at"`
+	}
+	if err := json.Unmarshal(data, &rows); err != nil {
+		return "", time.Time{}, false, err
+	}
+	if len(rows) == 0 {
+		return "", time.Time{}, false, nil
+	}
+	return rows[0].Role, rows[0].VerifiedAt, true, nil
+}
+
+// UpsertChatMember records (or refreshes) a verified Telegram chat membership.
+func (r *Repository) UpsertChatMember(ctx context.Context, chatID int64, telegramUserID int64, role string) error {
+	payload := map[string]any{
+		"chat_id":          chatID,
+		"telegram_user_id": telegramUserID,
+		"role":             role,
+		"verified_at":      time.Now().UTC().Format(time.RFC3339),
+	}
+	query := url.Values{"on_conflict": []string{"chat_id,telegram_user_id"}}
+	_, _, err := r.doRequest(ctx, http.MethodPost, tableChatMembers, query, payload, "resolution=merge-duplicates")
+	return err
+}
+
+// RemoveChatMember deletes a cached membership row, e.g. after a getChatMember
+// refresh shows the user has left or been banned.
+func (r *Repository) RemoveChatMember(ctx context.Context, chatID int64, telegramUserID int64) error {
+	query := url.Values{
+		"chat_id":          []string{fmt.Sprintf("eq.%d", chatID)},
+		"telegram_user_id": []string{fmt.Sprintf("eq.%d", telegramUserID)},
+	}
+	_, _, err := r.doRequest(ctx, http.MethodDelete, tableChatMembers, query, nil, "return=minimal")
+	return err
+}
+
+// ListChatsForUser returns the chats a Telegram user has a verified, cached
+// membership in -- i.e. chats they have previously opened in the dashboard.
+// Uses a PostgREST embedded-resource select over the chat_members -> chats
+// foreign key to express the join; the title sort happens client-side since
+// PostgREST can't order by a column on an embedded resource.
+func (r *Repository) ListChatsForUser(ctx context.Context, telegramUserID int64) ([]model.ChatSummaryRef, error) {
+	query := url.Values{
+		"telegram_user_id": []string{fmt.Sprintf("eq.%d", telegramUserID)},
+		"select":           []string{"chat_id,role,chats(chat_title)"},
+	}
+	data, _, err := r.doRequest(ctx, http.MethodGet, tableChatMembers, query, nil, "")
+	if err != nil {
+		return nil, err
+	}
+	var rows []struct {
+		ChatID int64  `json:"chat_id"`
+		Role   string `json:"role"`
+		Chats  struct {
+			ChatTitle string `json:"chat_title"`
+		} `json:"chats"`
+	}
+	if err := json.Unmarshal(data, &rows); err != nil {
+		return nil, err
+	}
+	chats := make([]model.ChatSummaryRef, 0, len(rows))
+	for _, row := range rows {
+		chats = append(chats, model.ChatSummaryRef{
+			ChatID:    row.ChatID,
+			ChatTitle: row.Chats.ChatTitle,
+			Role:      row.Role,
+		})
+	}
+	sort.Slice(chats, func(i, j int) bool { return chats[i].ChatTitle < chats[j].ChatTitle })
+	return chats, nil
+}
+
+// formatVector renders a float32 slice as Postgres's vector text input
+// format ("[v1,v2,...]"), the format pgvector expects over the REST API --
+// not a default JSON array, which Postgres's vector input parser won't
+// accept directly when passed through an RPC call's JSON body.
+func formatVector(values []float32) string {
+	parts := make([]string, len(values))
+	for i, v := range values {
+		parts[i] = strconv.FormatFloat(float64(v), 'f', -1, 32)
+	}
+	return "[" + strings.Join(parts, ",") + "]"
 }
 
 // nullableString converts an empty string to nil for nullable DB columns.

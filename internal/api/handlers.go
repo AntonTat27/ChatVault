@@ -14,13 +14,12 @@ import (
 	"time"
 
 	tgbot "github.com/go-telegram/bot"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"chatvault/internal/auth"
-	"chatvault/internal/db"
 	"chatvault/internal/model"
 	"chatvault/internal/notion"
 	"chatvault/internal/service"
+	"chatvault/internal/storage"
 )
 
 // allowedActionItemStatuses mirrors the CHECK constraint on action_items.status.
@@ -39,7 +38,7 @@ const (
 // Handler holds the dependencies for all dashboard API routes.
 type Handler struct {
 	services         *service.Services
-	pool             *pgxpool.Pool
+	repo             *storage.Repository
 	telegramBot      *tgbot.Bot
 	telegramBotToken string
 	notionOAuth      notion.OAuthConfig
@@ -51,10 +50,10 @@ type Handler struct {
 // NewHandler creates a Handler. telegramBot is used to re-verify chat
 // membership (via getChatMember) for routes that can't rely on the
 // RequireChatMembership middleware because chat_id isn't in their URL path.
-func NewHandler(services *service.Services, pool *pgxpool.Pool, telegramBot *tgbot.Bot, telegramBotToken string, notionOAuth notion.OAuthConfig, sessionSecret string, dashboardBaseURL string, httpTimeout time.Duration) *Handler {
+func NewHandler(services *service.Services, repo *storage.Repository, telegramBot *tgbot.Bot, telegramBotToken string, notionOAuth notion.OAuthConfig, sessionSecret string, dashboardBaseURL string, httpTimeout time.Duration) *Handler {
 	return &Handler{
 		services:         services,
-		pool:             pool,
+		repo:             repo,
 		telegramBot:      telegramBot,
 		telegramBotToken: telegramBotToken,
 		notionOAuth:      notionOAuth,
@@ -124,7 +123,7 @@ func (h *Handler) handleTelegramCallback(w http.ResponseWriter, r *http.Request)
 		Username:       payload.Username,
 		PhotoURL:       payload.PhotoURL,
 	}
-	if err := db.UpsertDashboardUser(r.Context(), h.pool, user); err != nil {
+	if err := h.repo.UpsertDashboardUser(r.Context(), user); err != nil {
 		http.Error(w, "failed to save user", http.StatusInternalServerError)
 		return
 	}
@@ -135,7 +134,7 @@ func (h *Handler) handleTelegramCallback(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	expiresAt := time.Now().Add(auth.SessionTTL)
-	if err := db.CreateDashboardSession(r.Context(), h.pool, tokenHash, telegramUserID, expiresAt); err != nil {
+	if err := h.repo.CreateDashboardSession(r.Context(), tokenHash, telegramUserID, expiresAt); err != nil {
 		http.Error(w, "failed to create session", http.StatusInternalServerError)
 		return
 	}
@@ -156,7 +155,7 @@ func (h *Handler) handleTelegramCallback(w http.ResponseWriter, r *http.Request)
 // handleLogout revokes the current session and clears the cookie.
 func (h *Handler) handleLogout(w http.ResponseWriter, r *http.Request) {
 	if cookie, err := r.Cookie(auth.SessionCookieName); err == nil && cookie.Value != "" {
-		_ = db.DeleteDashboardSession(r.Context(), h.pool, auth.HashToken(cookie.Value))
+		_ = h.repo.DeleteDashboardSession(r.Context(), auth.HashToken(cookie.Value))
 	}
 	http.SetCookie(w, &http.Cookie{
 		Name:     auth.SessionCookieName,
@@ -188,7 +187,7 @@ func (h *Handler) handleListChats(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not authenticated", http.StatusUnauthorized)
 		return
 	}
-	chats, err := db.ListChatsForUser(r.Context(), h.pool, userID)
+	chats, err := h.repo.ListChatsForUser(r.Context(), userID)
 	if err != nil {
 		http.Error(w, "failed to list chats", http.StatusInternalServerError)
 		return
@@ -275,7 +274,7 @@ func (h *Handler) handlePatchActionItem(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	if _, ok, err := auth.VerifyChatMembership(r.Context(), h.telegramBot, h.pool, item.ChatID, userID, false); err != nil {
+	if _, ok, err := auth.VerifyChatMembership(r.Context(), h.telegramBot, h.repo, item.ChatID, userID, false); err != nil {
 		http.Error(w, "membership verification failed", http.StatusInternalServerError)
 		return
 	} else if !ok {
@@ -392,7 +391,7 @@ func (h *Handler) handleNotionOAuthCallback(w http.ResponseWriter, r *http.Reque
 		http.Error(w, "invalid oauth state", http.StatusBadRequest)
 		return
 	}
-	if _, ok, err := auth.VerifyChatMembership(r.Context(), h.telegramBot, h.pool, chatID, userID, false); err != nil {
+	if _, ok, err := auth.VerifyChatMembership(r.Context(), h.telegramBot, h.repo, chatID, userID, false); err != nil {
 		http.Error(w, "membership verification failed", http.StatusInternalServerError)
 		return
 	} else if !ok {

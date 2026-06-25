@@ -4,17 +4,17 @@ import (
 	"net/http"
 
 	tgbot "github.com/go-telegram/bot"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"chatvault/internal/auth"
+	"chatvault/internal/storage"
 )
 
 // NewRouter builds the dashboard API's route table.
-func NewRouter(h *Handler, telegramBot *tgbot.Bot, pool *pgxpool.Pool, allowedOrigins []string) http.Handler {
+func NewRouter(h *Handler, telegramBot *tgbot.Bot, repo *storage.Repository, allowedOrigins []string) http.Handler {
 	mux := http.NewServeMux()
 
-	requireAuth := auth.RequireAuth(pool)
-	requireChatMembership := auth.RequireChatMembership(telegramBot, pool)
+	requireAuth := auth.RequireAuth(repo)
+	requireChatMembership := auth.RequireChatMembership(telegramBot, repo)
 	authed := func(handler http.HandlerFunc) http.Handler {
 		return requireAuth(handler)
 	}

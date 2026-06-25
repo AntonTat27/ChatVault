@@ -10,11 +10,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-
 	"chatvault/internal/ai"
 	"chatvault/internal/crypto"
-	"chatvault/internal/db"
 	"chatvault/internal/model"
 	"chatvault/internal/notion"
 	"chatvault/internal/storage"
@@ -58,6 +55,9 @@ type summaryRepository interface {
 	ListActionItems(ctx context.Context, chatID int64, status string) ([]model.ActionItem, error)
 	GetActionItem(ctx context.Context, id int64) (model.ActionItem, error)
 	UpdateActionItemStatus(ctx context.Context, id int64, status string) error
+	SearchMessages(ctx context.Context, chatID int64, query string, limit int) ([]model.Message, error)
+	SemanticSearchMessages(ctx context.Context, chatID int64, queryEmbedding []float32, limit int) ([]model.Message, error)
+	UpsertMessageEmbedding(ctx context.Context, messageID int64, chatID int64, values []float32, modelVersion string) error
 }
 
 // Services coordinates storage, AI processing, summary generation, and integrations.
@@ -68,7 +68,6 @@ type Services struct {
 	storageClient  *supabase.StorageClient
 	notionClient   *notion.Client
 	notionCipher   *crypto.Cipher
-	pool           *pgxpool.Pool
 	embeddingModel string
 	summaryHour    int
 	summaryMinute  int
@@ -88,7 +87,6 @@ func NewServices(
 	storageClient *supabase.StorageClient,
 	notionClient *notion.Client,
 	notionCipher *crypto.Cipher,
-	pool *pgxpool.Pool,
 	embeddingModel string,
 	summaryHour int,
 	summaryMinute int,
@@ -100,7 +98,6 @@ func NewServices(
 		storageClient:  storageClient,
 		notionClient:   notionClient,
 		notionCipher:   notionCipher,
-		pool:           pool,
 		embeddingModel: embeddingModel,
 		summaryHour:    summaryHour,
 		summaryMinute:  summaryMinute,
@@ -148,10 +145,9 @@ func (s *Services) HandleIncomingMessage(ctx context.Context, message model.Mess
 }
 
 // enqueueEmbeddingJob queues embedding generation for a classified message.
-// Noise-tagged messages are skipped to control Gemini cost, and the job is a
-// no-op if semantic search isn't configured (no DATABASE_URL/pool).
+// Noise-tagged messages are skipped to control Gemini cost.
 func (s *Services) enqueueEmbeddingJob(ctx context.Context, chatID int64, messageRowID int64, text string, aiTag string) {
-	if s.pool == nil || aiTag == model.TagNoise || strings.TrimSpace(text) == "" {
+	if aiTag == model.TagNoise || strings.TrimSpace(text) == "" {
 		return
 	}
 	s.enqueue(ctx, func(jobCtx context.Context) {
@@ -160,7 +156,7 @@ func (s *Services) enqueueEmbeddingJob(ctx context.Context, chatID int64, messag
 			logProcessingError(chatID, 0, "embedding_generation", err)
 			return
 		}
-		if err := db.UpsertMessageEmbedding(jobCtx, s.pool, messageRowID, chatID, values, s.embeddingModel); err != nil {
+		if err := s.repo.UpsertMessageEmbedding(jobCtx, messageRowID, chatID, values, s.embeddingModel); err != nil {
 			logProcessingError(chatID, 0, "embedding_write", err)
 		}
 	})
@@ -263,23 +259,18 @@ func (s *Services) ListTaggedMessages(ctx context.Context, chatID int64, tag str
 }
 
 // SearchMessages searches for messages matching a query using full-text search.
-// Returns an error if the database pool is not configured.
 func (s *Services) SearchMessages(ctx context.Context, chatID int64, query string) ([]model.Message, error) {
-	return db.SearchMessages(ctx, s.pool, chatID, query, 50)
+	return s.repo.SearchMessages(ctx, chatID, query, 50)
 }
 
 // SemanticSearchMessages searches for messages whose meaning is closest to
 // the query text, using a Gemini embedding compared via pgvector distance.
-// Returns an error if the database pool is not configured.
 func (s *Services) SemanticSearchMessages(ctx context.Context, chatID int64, query string) ([]model.Message, error) {
-	if s.pool == nil {
-		return nil, fmt.Errorf("database pool is nil; ensure DatabaseURL is configured")
-	}
 	queryEmbedding, err := s.gemini.GenerateEmbedding(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("generate query embedding: %w", err)
 	}
-	return db.SemanticSearchMessages(ctx, s.pool, chatID, queryEmbedding, 50)
+	return s.repo.SemanticSearchMessages(ctx, chatID, queryEmbedding, 50)
 }
 
 // SaveNotionConfig stores Notion integration credentials for a chat.

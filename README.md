@@ -20,13 +20,12 @@ Optional:
 - `GEMINI_MODEL` (default `gemini-3.5-flash`)
 - `GEMINI_SUMMARY_MODEL` (default `gemini-2.0-flash`)
 - `GEMINI_TRANSCRIBE_MODEL` (default `gemini-3.5-flash`)
-- `GEMINI_EMBEDDING_MODEL` (default `text-embedding-004`) — used for `/semantic-search` and the embedding backfill; requires `DATABASE_URL` to be set
+- `GEMINI_EMBEDDING_MODEL` (default `text-embedding-004`) — used for `/semantic-search` and the embedding backfill
 - `SUPABASE_STORAGE_BUCKET` (default `chatvault`)
 - `DAILY_SUMMARY_HOUR_UTC` (default `18`)
 - `DAILY_SUMMARY_MINUTE_UTC` (default `0`)
 - `HTTP_TIMEOUT_SECONDS` (default `30`)
 - `NOTION_VERSION` (default `2022-06-28`)
-- `DATABASE_URL` — direct Postgres DSN (Supabase **transaction pooler** connection string, not the REST URL) used by `internal/db` for pgx-based features; the bot boots fine without it, but `cmd/chatvault-api` requires it
 - `DASHBOARD_BASE_URL` — public URL of the deployed dashboard frontend (e.g. `https://app.example.com`); used by `/dashboard` and the new `/notion` deep link, and as the OAuth post-connect redirect target
 
 Required to run `cmd/chatvault-api` (the dashboard):
@@ -60,8 +59,9 @@ Run SQL from, in order:
 - `migrations/004_embeddings.sql` (requires the `vector` extension; only needed for `/semantic-search`)
 - `migrations/005_dashboard_auth.sql` (only needed to run `cmd/chatvault-api`)
 - `migrations/006_notion_oauth.sql` (only needed for Notion OAuth onboarding)
+- `migrations/007_supabase_rpc.sql` (only needed for `/search` and `/semantic-search`; adds the `search_messages`/`semantic_search_messages` RPC functions and the `messages_missing_embeddings` view PostgREST needs, since ranking and vector-distance ordering can't be expressed as a plain REST filter)
 
-Use Supabase SQL Editor or psql against the Supabase project database.
+Use Supabase SQL Editor or psql against the Supabase project database. There is no direct Postgres connection anywhere in this codebase — every feature (including search and the dashboard's session/membership caching) talks to the database exclusively through Supabase's PostgREST REST API via `internal/storage.Repository`.
 
 ## Run locally
 
@@ -99,8 +99,8 @@ docker run --rm --env-file .env chatvault
 - `/decisions` -> decision messages from last 7 days
 - `/actions` -> open action items (status/owner/due date), tracked durably in the `action_items` table
 - `/done <id>` -> mark an action item completed
-- `/search <query>` -> full-text search over message history (requires `DATABASE_URL`)
-- `/semantic-search <query>` -> meaning-based search via Gemini embeddings (requires `DATABASE_URL` and `GEMINI_EMBEDDING_MODEL`)
+- `/search <query>` -> full-text search over message history (requires `migrations/007_supabase_rpc.sql`)
+- `/semantic-search <query>` -> meaning-based search via Gemini embeddings (requires `migrations/007_supabase_rpc.sql` and `GEMINI_EMBEDDING_MODEL`)
 - `/notion` -> connect Notion via OAuth through the dashboard (requires `DASHBOARD_BASE_URL`)
 - `/notion <token> <database_id>` -> legacy plaintext connect; still works, deprecated in favor of the OAuth flow above
 - `/export` -> export today's summary to Notion

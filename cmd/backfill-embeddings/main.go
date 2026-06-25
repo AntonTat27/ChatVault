@@ -11,7 +11,7 @@ import (
 
 	"chatvault/internal/ai"
 	"chatvault/internal/config"
-	"chatvault/internal/db"
+	"chatvault/internal/storage"
 
 	"github.com/joho/godotenv"
 )
@@ -26,25 +26,17 @@ func main() {
 	if err != nil {
 		log.Fatalf("config load failed: %v", err)
 	}
-	if cfg.DatabaseURL == "" {
-		log.Fatalf("DATABASE_URL is required to run the embedding backfill")
-	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	pool, err := db.NewPool(ctx, cfg.DatabaseURL)
-	if err != nil {
-		log.Fatalf("database pool init failed: %v", err)
-	}
-	defer pool.Close()
-
+	repo := storage.NewRepository(cfg.SupabaseURL, cfg.SupabaseSecretKey, cfg.HTTPTimeout)
 	geminiClient := ai.NewGeminiClient(cfg.GeminiAPIKey, cfg.GeminiClassificationModel, cfg.GeminiSummaryModel, cfg.GeminiEmbeddingModel, cfg.HTTPTimeout)
 
 	var afterID int64
 	var processed, failed int
 	for {
-		messages, err := db.ListMessagesMissingEmbeddings(ctx, pool, afterID, backfillBatchSize)
+		messages, err := repo.ListMessagesMissingEmbeddings(ctx, afterID, backfillBatchSize)
 		if err != nil {
 			log.Fatalf("list messages missing embeddings: %v", err)
 		}
@@ -68,7 +60,7 @@ func main() {
 				failed++
 				continue
 			}
-			if err := db.UpsertMessageEmbedding(ctx, pool, msg.ID, msg.ChatID, values, cfg.GeminiEmbeddingModel); err != nil {
+			if err := repo.UpsertMessageEmbedding(ctx, msg.ID, msg.ChatID, values, cfg.GeminiEmbeddingModel); err != nil {
 				log.Printf("embedding write failed message_id=%d: %v", msg.ID, err)
 				failed++
 				continue

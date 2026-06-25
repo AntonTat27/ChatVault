@@ -13,6 +13,10 @@ import (
 // behavior in isolation from network-backed dependencies (Gemini, PostgREST).
 type fakeActionItemRepo struct {
 	createCalls []model.ActionItem
+
+	searchResult []model.Message
+	searchChatID int64
+	searchQuery  string
 }
 
 func (f *fakeActionItemRepo) UpsertChat(ctx context.Context, chatID int64, chatTitle string, summaryHour int, summaryMinute int) error {
@@ -68,6 +72,17 @@ func (f *fakeActionItemRepo) GetActionItem(ctx context.Context, id int64) (model
 	return model.ActionItem{}, nil
 }
 func (f *fakeActionItemRepo) UpdateActionItemStatus(ctx context.Context, id int64, status string) error {
+	return nil
+}
+func (f *fakeActionItemRepo) SearchMessages(ctx context.Context, chatID int64, query string, limit int) ([]model.Message, error) {
+	f.searchChatID = chatID
+	f.searchQuery = query
+	return f.searchResult, nil
+}
+func (f *fakeActionItemRepo) SemanticSearchMessages(ctx context.Context, chatID int64, queryEmbedding []float32, limit int) ([]model.Message, error) {
+	return nil, nil
+}
+func (f *fakeActionItemRepo) UpsertMessageEmbedding(ctx context.Context, messageID int64, chatID int64, values []float32, modelVersion string) error {
 	return nil
 }
 

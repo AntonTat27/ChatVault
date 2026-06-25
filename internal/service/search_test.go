@@ -3,44 +3,26 @@ package service
 import (
 	"context"
 	"testing"
+
+	"chatvault/internal/model"
 )
 
-// TestSearchMessages_NilPool verifies that SearchMessages returns an error
-// when the Services has no pool configured.
-func TestSearchMessages_NilPool(t *testing.T) {
-	// Create a minimal Services with nil pool
-	s := &Services{
-		pool: nil,
+// TestSearchMessages_DelegatesToRepo verifies that SearchMessages passes the
+// chat ID and query through to the repository (PostgREST search_messages RPC)
+// and returns whatever it gets back.
+func TestSearchMessages_DelegatesToRepo(t *testing.T) {
+	want := []model.Message{{ID: 1, Text: "hello"}}
+	repo := &fakeActionItemRepo{searchResult: want}
+	s := &Services{repo: repo}
+
+	got, err := s.SearchMessages(context.Background(), 12345, "test query")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
-
-	ctx := context.Background()
-	messages, err := s.SearchMessages(ctx, 12345, "test query")
-
-	if err == nil {
-		t.Fatal("expected error for nil pool, got nil")
+	if len(got) != 1 || got[0].ID != 1 {
+		t.Fatalf("expected delegated result, got %v", got)
 	}
-
-	// When there's an error, the result should be nil
-	if messages != nil {
-		t.Fatal("expected nil slice for nil pool with error")
-	}
-}
-
-// TestSemanticSearchMessages_NilPool verifies that SemanticSearchMessages
-// returns an error when the Services has no pool configured, without
-// reaching the (also nil) Gemini client.
-func TestSemanticSearchMessages_NilPool(t *testing.T) {
-	s := &Services{
-		pool: nil,
-	}
-
-	ctx := context.Background()
-	messages, err := s.SemanticSearchMessages(ctx, 12345, "test query")
-
-	if err == nil {
-		t.Fatal("expected error for nil pool, got nil")
-	}
-	if messages != nil {
-		t.Fatal("expected nil slice for nil pool with error")
+	if repo.searchChatID != 12345 || repo.searchQuery != "test query" {
+		t.Fatalf("expected args to be forwarded, got chat_id=%d query=%q", repo.searchChatID, repo.searchQuery)
 	}
 }
