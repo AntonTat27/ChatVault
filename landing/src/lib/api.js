@@ -17,6 +17,7 @@ async function request(url, options = {}) {
 
 export function telegramLogin(payload) {
   return request(`${AUTH_BASE_URL}/telegram/callback`, {
+    headers: new Headers({'content-type': 'application/json'}),
     method: 'POST',
     body: JSON.stringify(payload),
   })
