@@ -69,7 +69,7 @@ func Load() (Config, error) {
 		DailySummaryMinuteUTC:     minute,
 		HTTPTimeout:               time.Duration(getEnvInt("HTTP_TIMEOUT_SECONDS", defaultHTTPTimeoutSec)) * time.Second,
 		SessionSecret:             os.Getenv("SESSION_SECRET"),
-		APIPort:                   getEnv("API_PORT", ":8081"),
+		APIPort:                   getEnv("API_PORT", ":"+getEnv("PORT", "8081")),
 		AllowedOrigins:            splitAndTrim(os.Getenv("ALLOWED_ORIGINS")),
 		DashboardBaseURL:          os.Getenv("DASHBOARD_BASE_URL"),
 		NotionOAuthClientID:       os.Getenv("NOTION_OAUTH_CLIENT_ID"),
