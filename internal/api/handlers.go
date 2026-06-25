@@ -151,7 +151,7 @@ func (h *Handler) handleTelegramCallback(w http.ResponseWriter, r *http.Request)
 		Expires:  expiresAt,
 		HttpOnly: true,
 		Secure:   isSecureRequest(r),
-		SameSite: http.SameSiteLaxMode,
+		SameSite: http.SameSiteNoneMode,
 	})
 
 	writeJSON(w, http.StatusOK, user)
