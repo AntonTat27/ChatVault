@@ -20,18 +20,18 @@ import (
 )
 
 const (
-	tableChats             = "chats"
-	tableMessages          = "messages"
-	tableSummaries         = "daily_summaries"
-	tableNotionConfig      = "notion_configs"
-	tableActionItems       = "action_items"
-	tableMessageEmbeddings = "message_embeddings"
-	viewMissingEmbeddings  = "messages_missing_embeddings"
-	tableDashboardUsers    = "dashboard_users"
-	tableDashboardSessions = "dashboard_sessions"
-	tableChatMembers       = "chat_members"
-	rpcSearchMessages      = "rpc/search_messages"
-	rpcSemanticSearch      = "rpc/semantic_search_messages"
+	tableChats               = "chats"
+	tableMessages            = "messages"
+	tableSummaries           = "daily_summaries"
+	tableNotionConfig        = "notion_configs"
+	tableActionItems         = "action_items"
+	tableMessageEmbeddings   = "message_embeddings"
+	viewMissingEmbeddings    = "messages_missing_embeddings"
+	tableDashboardUsers      = "dashboard_users"
+	tableDashboardSessions   = "dashboard_sessions"
+	tableChatAuthorizedUsers = "chat_authorized_users"
+	rpcSearchMessages        = "rpc/search_messages"
+	rpcSemanticSearch        = "rpc/semantic_search_messages"
 
 	// searchQueryLimit is the maximum number of results to return from a search.
 	searchQueryLimit = 50
@@ -274,6 +274,39 @@ func (r *Repository) ListSummaries(ctx context.Context, chatID int64, limit int)
 		summaries = append(summaries, row.summaryRow.toSummary(chatID, row.SummaryDateUTC))
 	}
 	return summaries, nil
+}
+
+// ListMessagesByTag returns paginated tagged messages for a chat, ordered by
+// id descending. Pass aiTag="" to include all non-noise messages. Pass
+// beforeID=0 to start from the newest; pass the smallest id from the previous
+// page to load older messages. Limit is capped at 50.
+func (r *Repository) ListMessagesByTag(ctx context.Context, chatID int64, aiTag string, beforeID int64, limit int) ([]model.Message, error) {
+	if limit <= 0 || limit > searchQueryLimit {
+		limit = searchQueryLimit
+	}
+	query := url.Values{
+		"chat_id": []string{fmt.Sprintf("eq.%d", chatID)},
+		"order":   []string{"id.desc"},
+		"limit":   []string{strconv.Itoa(limit)},
+		"select":  []string{messageColumns},
+	}
+	if aiTag != "" {
+		query["ai_tag"] = []string{fmt.Sprintf("eq.%s", aiTag)}
+	} else {
+		query["ai_tag"] = []string{"neq.noise"}
+	}
+	if beforeID > 0 {
+		query["id"] = []string{fmt.Sprintf("lt.%d", beforeID)}
+	}
+	data, _, err := r.doRequest(ctx, http.MethodGet, tableMessages, query, nil, "")
+	if err != nil {
+		return nil, err
+	}
+	var rows []messageRow
+	if err := json.Unmarshal(data, &rows); err != nil {
+		return nil, err
+	}
+	return hydrateMessages(rows), nil
 }
 
 // ListMessagesByTagSince returns tagged messages for a time window.
@@ -651,66 +684,56 @@ func (r *Repository) DeleteDashboardSession(ctx context.Context, tokenHash strin
 	return err
 }
 
-// GetChatMemberCache returns a cached membership verification for a
-// (chat, user) pair, if one exists.
-func (r *Repository) GetChatMemberCache(ctx context.Context, chatID int64, telegramUserID int64) (role string, verifiedAt time.Time, found bool, err error) {
+// IsChatAuthorized reports whether telegramUserID has been granted dashboard
+// access to chatID -- either as the chat's owner (recorded when the bot was
+// added) or by having run /dashboard themselves. Access is a permanent
+// grant; there is no live re-check against Telegram and no expiry.
+func (r *Repository) IsChatAuthorized(ctx context.Context, chatID int64, telegramUserID int64) (bool, error) {
 	query := url.Values{
 		"chat_id":          []string{fmt.Sprintf("eq.%d", chatID)},
 		"telegram_user_id": []string{fmt.Sprintf("eq.%d", telegramUserID)},
-		"select":           []string{"role,verified_at"},
+		"select":           []string{"chat_id"},
 	}
-	data, _, err := r.doRequest(ctx, http.MethodGet, tableChatMembers, query, nil, "")
+	data, _, err := r.doRequest(ctx, http.MethodGet, tableChatAuthorizedUsers, query, nil, "")
 	if err != nil {
-		return "", time.Time{}, false, err
+		return false, err
 	}
 	var rows []struct {
-		Role       string    `json:"role"`
-		VerifiedAt time.Time `json:"verified_at"`
+		ChatID int64 `json:"chat_id"`
 	}
 	if err := json.Unmarshal(data, &rows); err != nil {
-		return "", time.Time{}, false, err
+		return false, err
 	}
-	if len(rows) == 0 {
-		return "", time.Time{}, false, nil
-	}
-	return rows[0].Role, rows[0].VerifiedAt, true, nil
+	return len(rows) > 0, nil
 }
 
-// UpsertChatMember records (or refreshes) a verified Telegram chat membership.
-func (r *Repository) UpsertChatMember(ctx context.Context, chatID int64, telegramUserID int64, role string) error {
+// GrantChatAccess records that telegramUserID is authorized to view chatID's
+// dashboard. role is "owner" (granted automatically when the bot is added to
+// the chat) or "member" (self-granted by running /dashboard). Idempotent: a
+// second grant for the same (chat, user) pair is a no-op, so an owner
+// re-running /dashboard doesn't downgrade their role.
+func (r *Repository) GrantChatAccess(ctx context.Context, chatID int64, telegramUserID int64, role string) error {
 	payload := map[string]any{
 		"chat_id":          chatID,
 		"telegram_user_id": telegramUserID,
 		"role":             role,
-		"verified_at":      time.Now().UTC().Format(time.RFC3339),
 	}
 	query := url.Values{"on_conflict": []string{"chat_id,telegram_user_id"}}
-	_, _, err := r.doRequest(ctx, http.MethodPost, tableChatMembers, query, payload, "resolution=merge-duplicates")
+	_, _, err := r.doRequest(ctx, http.MethodPost, tableChatAuthorizedUsers, query, payload, "resolution=ignore-duplicates")
 	return err
 }
 
-// RemoveChatMember deletes a cached membership row, e.g. after a getChatMember
-// refresh shows the user has left or been banned.
-func (r *Repository) RemoveChatMember(ctx context.Context, chatID int64, telegramUserID int64) error {
-	query := url.Values{
-		"chat_id":          []string{fmt.Sprintf("eq.%d", chatID)},
-		"telegram_user_id": []string{fmt.Sprintf("eq.%d", telegramUserID)},
-	}
-	_, _, err := r.doRequest(ctx, http.MethodDelete, tableChatMembers, query, nil, "return=minimal")
-	return err
-}
-
-// ListChatsForUser returns the chats a Telegram user has a verified, cached
-// membership in -- i.e. chats they have previously opened in the dashboard.
-// Uses a PostgREST embedded-resource select over the chat_members -> chats
-// foreign key to express the join; the title sort happens client-side since
-// PostgREST can't order by a column on an embedded resource.
+// ListChatsForUser returns the chats a Telegram user has been granted
+// dashboard access to. Uses a PostgREST embedded-resource select over the
+// chat_authorized_users -> chats foreign key to express the join; the title
+// sort happens client-side since PostgREST can't order by a column on an
+// embedded resource.
 func (r *Repository) ListChatsForUser(ctx context.Context, telegramUserID int64) ([]model.ChatSummaryRef, error) {
 	query := url.Values{
 		"telegram_user_id": []string{fmt.Sprintf("eq.%d", telegramUserID)},
 		"select":           []string{"chat_id,role,chats(chat_title)"},
 	}
-	data, _, err := r.doRequest(ctx, http.MethodGet, tableChatMembers, query, nil, "")
+	data, _, err := r.doRequest(ctx, http.MethodGet, tableChatAuthorizedUsers, query, nil, "")
 	if err != nil {
 		return nil, err
 	}
@@ -733,6 +756,35 @@ func (r *Repository) ListChatsForUser(ctx context.Context, telegramUserID int64)
 		})
 	}
 	sort.Slice(chats, func(i, j int) bool { return chats[i].ChatTitle < chats[j].ChatTitle })
+	return chats, nil
+}
+
+// ListAllChats returns every chat in the chats table. Used in dev bypass mode
+// when chat_members may be empty but real chat data exists in the database.
+func (r *Repository) ListAllChats(ctx context.Context) ([]model.ChatSummaryRef, error) {
+	query := url.Values{
+		"select": []string{"chat_id,chat_title"},
+		"order":  []string{"chat_title.asc"},
+	}
+	data, _, err := r.doRequest(ctx, http.MethodGet, tableChats, query, nil, "")
+	if err != nil {
+		return nil, err
+	}
+	var rows []struct {
+		ChatID    int64  `json:"chat_id"`
+		ChatTitle string `json:"chat_title"`
+	}
+	if err := json.Unmarshal(data, &rows); err != nil {
+		return nil, err
+	}
+	chats := make([]model.ChatSummaryRef, 0, len(rows))
+	for _, row := range rows {
+		chats = append(chats, model.ChatSummaryRef{
+			ChatID:    row.ChatID,
+			ChatTitle: row.ChatTitle,
+			Role:      "member",
+		})
+	}
 	return chats, nil
 }
 
@@ -865,6 +917,7 @@ func hydrateMessages(rows []messageRow) []model.Message {
 func hydrateActionItems(rows []actionItemRow) []model.ActionItem {
 	items := make([]model.ActionItem, 0, len(rows))
 	for _, row := range rows {
+		t := row.CreatedAt
 		items = append(items, model.ActionItem{
 			ID:             &row.ID,
 			ChatID:         row.ChatID,
@@ -873,6 +926,7 @@ func hydrateActionItems(rows []actionItemRow) []model.ActionItem {
 			Status:         row.Status,
 			DueDate:        row.DueDate,
 			AssigneeUserID: row.AssigneeUserID,
+			CreatedAt:      &t,
 		})
 	}
 	return items

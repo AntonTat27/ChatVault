@@ -46,6 +46,7 @@ type summaryRepository interface {
 	GetSummary(ctx context.Context, chatID int64, dateUTC string) (model.DailySummary, error)
 	ListSummaries(ctx context.Context, chatID int64, limit int) ([]model.DailySummary, error)
 	ListMessagesByTagSince(ctx context.Context, chatID int64, aiTag string, since time.Time) ([]model.Message, error)
+	ListMessagesByTag(ctx context.Context, chatID int64, aiTag string, beforeID int64, limit int) ([]model.Message, error)
 	ListActiveChatsForSchedule(ctx context.Context, hour int, minute int) ([]int64, error)
 	SaveNotionConfig(ctx context.Context, chatID int64, token string, databaseID string) error
 	GetNotionConfig(ctx context.Context, chatID int64) (model.NotionConfig, error)
@@ -114,6 +115,15 @@ func NewServices(
 func (s *Services) Close() {
 	close(s.jobs)
 	s.wg.Wait()
+}
+
+// EnsureChat upserts chat metadata using the configured summary schedule
+// defaults. Exposed so the bot's my_chat_member handler can guarantee a
+// chats row exists (chat_authorized_users has a foreign key to it) before
+// granting the adding user dashboard access, without waiting for a first
+// ingested message to create it.
+func (s *Services) EnsureChat(ctx context.Context, chatID int64, chatTitle string) error {
+	return s.repo.UpsertChat(ctx, chatID, chatTitle, s.summaryHour, s.summaryMinute)
 }
 
 // HandleIncomingMessage stores a message and queues async classification.
@@ -256,6 +266,17 @@ func (s *Services) GenerateSummaryAsync(ctx context.Context, chatID int64, dateU
 func (s *Services) ListTaggedMessages(ctx context.Context, chatID int64, tag string) ([]model.Message, error) {
 	since := time.Now().UTC().AddDate(0, 0, -commandWindowDays)
 	return s.repo.ListMessagesByTagSince(ctx, chatID, tag, since)
+}
+
+const taggedMessagePageSize = 20
+
+// ListMessages returns paginated messages for a chat, suitable for dashboard
+// list pages. If tag is empty, all non-noise messages are returned (for the
+// timeline). If tag is non-empty, only messages with that tag are returned.
+// beforeID is a cursor: pass 0 to start from the newest, or the smallest id
+// from the previous page to load older messages.
+func (s *Services) ListMessages(ctx context.Context, chatID int64, tag string, beforeID int64) ([]model.Message, error) {
+	return s.repo.ListMessagesByTag(ctx, chatID, tag, beforeID, taggedMessagePageSize)
 }
 
 // SearchMessages searches for messages matching a query using full-text search.

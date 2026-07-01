@@ -14,8 +14,6 @@ import (
 	"strings"
 	"time"
 
-	tgbot "github.com/go-telegram/bot"
-
 	"chatvault/internal/auth"
 	"chatvault/internal/model"
 	"chatvault/internal/notion"
@@ -40,27 +38,27 @@ const (
 type Handler struct {
 	services         *service.Services
 	repo             *storage.Repository
-	telegramBot      *tgbot.Bot
 	telegramBotToken string
 	notionOAuth      notion.OAuthConfig
 	sessionSecret    string
 	dashboardBaseURL string
 	httpClient       *http.Client
+	devAuthBypass    bool
 }
 
-// NewHandler creates a Handler. telegramBot is used to re-verify chat
-// membership (via getChatMember) for routes that can't rely on the
-// RequireChatMembership middleware because chat_id isn't in their URL path.
-func NewHandler(services *service.Services, repo *storage.Repository, telegramBot *tgbot.Bot, telegramBotToken string, notionOAuth notion.OAuthConfig, sessionSecret string, dashboardBaseURL string, httpTimeout time.Duration) *Handler {
+// NewHandler creates a Handler. telegramBotToken is used only to verify the
+// Telegram Login Widget's HMAC signature (auth.VerifyTelegramLoginHash) --
+// this binary makes no Bot API calls itself.
+func NewHandler(services *service.Services, repo *storage.Repository, telegramBotToken string, notionOAuth notion.OAuthConfig, sessionSecret string, dashboardBaseURL string, httpTimeout time.Duration, devAuthBypass bool) *Handler {
 	return &Handler{
 		services:         services,
 		repo:             repo,
-		telegramBot:      telegramBot,
 		telegramBotToken: telegramBotToken,
 		notionOAuth:      notionOAuth,
 		sessionSecret:    sessionSecret,
 		dashboardBaseURL: dashboardBaseURL,
 		httpClient:       &http.Client{Timeout: httpTimeout},
+		devAuthBypass:    devAuthBypass,
 	}
 }
 
@@ -85,34 +83,42 @@ func (h *Handler) handleTelegramCallback(w http.ResponseWriter, r *http.Request)
 	}
 	idStr := string(payload.ID)
 	authDateStr := string(payload.AuthDate)
-	if idStr == "" || authDateStr == "" || payload.Hash == "" {
-		log.Printf("ERROR: missing required fields - id: '%s', auth_date: '%s', hash: '%s'", idStr, authDateStr, payload.Hash)
-		http.Error(w, "missing required login fields", http.StatusBadRequest)
-		return
-	}
+	if h.devAuthBypass {
+		if idStr == "" {
+			http.Error(w, "missing user id", http.StatusBadRequest)
+			return
+		}
+		log.Printf("WARN: DEV_AUTH_BYPASS — skipping Telegram signature/date check for user id=%s", idStr)
+	} else {
+		if idStr == "" || authDateStr == "" || payload.Hash == "" {
+			log.Printf("ERROR: missing required fields - id: '%s', auth_date: '%s', hash: '%s'", idStr, authDateStr, payload.Hash)
+			http.Error(w, "missing required login fields", http.StatusBadRequest)
+			return
+		}
 
-	fields := map[string]string{
-		"id":         idStr,
-		"first_name": payload.FirstName,
-		"auth_date":  authDateStr,
-	}
-	if payload.LastName != "" {
-		fields["last_name"] = payload.LastName
-	}
-	if payload.Username != "" {
-		fields["username"] = payload.Username
-	}
-	if payload.PhotoURL != "" {
-		fields["photo_url"] = payload.PhotoURL
-	}
+		fields := map[string]string{
+			"id":         idStr,
+			"first_name": payload.FirstName,
+			"auth_date":  authDateStr,
+		}
+		if payload.LastName != "" {
+			fields["last_name"] = payload.LastName
+		}
+		if payload.Username != "" {
+			fields["username"] = payload.Username
+		}
+		if payload.PhotoURL != "" {
+			fields["photo_url"] = payload.PhotoURL
+		}
 
-	if !auth.VerifyTelegramLoginHash(h.telegramBotToken, fields, payload.Hash) {
-		http.Error(w, "invalid login signature", http.StatusUnauthorized)
-		return
-	}
-	if !auth.IsAuthDateFresh(authDateStr) {
-		http.Error(w, "login payload expired", http.StatusUnauthorized)
-		return
+		if !auth.VerifyTelegramLoginHash(h.telegramBotToken, fields, payload.Hash) {
+			http.Error(w, "invalid login signature", http.StatusUnauthorized)
+			return
+		}
+		if !auth.IsAuthDateFresh(authDateStr) {
+			http.Error(w, "login payload expired", http.StatusUnauthorized)
+			return
+		}
 	}
 
 	telegramUserID, err := strconv.ParseInt(idStr, 10, 64)
@@ -144,14 +150,19 @@ func (h *Handler) handleTelegramCallback(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	secure := isSecureRequest(r)
+	sameSite := http.SameSiteLaxMode
+	if secure {
+		sameSite = http.SameSiteNoneMode
+	}
 	http.SetCookie(w, &http.Cookie{
 		Name:     auth.SessionCookieName,
 		Value:    rawToken,
 		Path:     "/",
 		Expires:  expiresAt,
 		HttpOnly: true,
-		Secure:   isSecureRequest(r),
-		SameSite: http.SameSiteNoneMode,
+		Secure:   secure,
+		SameSite: sameSite,
 	})
 
 	writeJSON(w, http.StatusOK, user)
@@ -184,15 +195,21 @@ func isSecureRequest(r *http.Request) bool {
 	return r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
 }
 
-// handleListChats returns the chats the authenticated user has a verified,
-// cached membership in.
+// handleListChats returns the chats the authenticated user has been granted
+// dashboard access to. In dev bypass mode it returns all chats, since
+// chat_authorized_users may be empty when running locally against a real
+// database.
 func (h *Handler) handleListChats(w http.ResponseWriter, r *http.Request) {
 	userID, ok := auth.UserIDFromContext(r.Context())
 	if !ok {
 		http.Error(w, "not authenticated", http.StatusUnauthorized)
 		return
 	}
-	chats, err := h.repo.ListChatsForUser(r.Context(), userID)
+	var (
+		chats []model.ChatSummaryRef
+		err   error
+	)
+	chats, err = h.repo.ListChatsForUser(r.Context(), userID)
 	if err != nil {
 		http.Error(w, "failed to list chats", http.StatusInternalServerError)
 		return
@@ -244,9 +261,9 @@ type patchActionItemRequest struct {
 }
 
 // handlePatchActionItem updates an action item's status, after confirming
-// the caller has a cached, verified membership in the item's chat. The route
-// is not nested under /chats/{id}, so membership can't be checked by the
-// router-level RequireChatMembership middleware; it's checked here instead.
+// the caller has been granted access to the item's chat. The route is not
+// nested under /chats/{id}, so access can't be checked by the router-level
+// RequireChatMembership middleware; it's checked here instead.
 func (h *Handler) handlePatchActionItem(w http.ResponseWriter, r *http.Request) {
 	userID, ok := auth.UserIDFromContext(r.Context())
 	if !ok {
@@ -279,12 +296,14 @@ func (h *Handler) handlePatchActionItem(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	if _, ok, err := auth.VerifyChatMembership(r.Context(), h.telegramBot, h.repo, item.ChatID, userID, false); err != nil {
-		http.Error(w, "membership verification failed", http.StatusInternalServerError)
-		return
-	} else if !ok {
-		http.Error(w, "not a member of this action item's chat", http.StatusForbidden)
-		return
+	if !h.devAuthBypass {
+		if ok, err := auth.VerifyChatMembership(r.Context(), h.repo, item.ChatID, userID); err != nil {
+			http.Error(w, "membership verification failed", http.StatusInternalServerError)
+			return
+		} else if !ok {
+			http.Error(w, "not authorized for this action item's chat", http.StatusForbidden)
+			return
+		}
 	}
 
 	if err := h.services.UpdateActionItemStatus(r.Context(), id, body.Status); err != nil {
@@ -292,6 +311,48 @@ func (h *Handler) handlePatchActionItem(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+var allowedMessageTags = map[string]struct{}{
+	model.TagDecision:   {},
+	model.TagActionItem: {},
+	model.TagIdea:       {},
+	model.TagQuestion:   {},
+	model.TagDocument:   {},
+}
+
+// handleListMessages returns paginated messages for a chat. The optional
+// ?tag= parameter filters by ai_tag; omitting it returns all non-noise
+// messages (useful for the timeline). ?before_id=<id> is a cursor for
+// loading older pages.
+func (h *Handler) handleListMessages(w http.ResponseWriter, r *http.Request) {
+	chatID, ok := auth.ChatIDFromContext(r.Context())
+	if !ok {
+		http.Error(w, "missing chat id", http.StatusBadRequest)
+		return
+	}
+	tag := strings.TrimSpace(r.URL.Query().Get("tag"))
+	if tag != "" {
+		if _, valid := allowedMessageTags[tag]; !valid {
+			http.Error(w, "invalid tag parameter", http.StatusBadRequest)
+			return
+		}
+	}
+	var beforeID int64
+	if raw := strings.TrimSpace(r.URL.Query().Get("before_id")); raw != "" {
+		var err error
+		beforeID, err = strconv.ParseInt(raw, 10, 64)
+		if err != nil {
+			http.Error(w, "invalid before_id", http.StatusBadRequest)
+			return
+		}
+	}
+	messages, err := h.services.ListMessages(r.Context(), chatID, tag, beforeID)
+	if err != nil {
+		http.Error(w, "failed to list messages", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, messages)
 }
 
 // handleSearch runs full-text (default) or semantic (?mode=semantic) search
@@ -375,8 +436,8 @@ func (h *Handler) handleNotionOAuthStart(w http.ResponseWriter, r *http.Request)
 }
 
 // handleNotionOAuthCallback completes the OAuth handshake: it recovers the
-// chat_id from state, confirms the logged-in user is a cached member of that
-// chat, exchanges the code for an access token, and stores it encrypted.
+// chat_id from state, confirms the logged-in user has been granted access to
+// that chat, exchanges the code for an access token, and stores it encrypted.
 // This route runs behind RequireAuth only (not RequireChatMembership),
 // because the chat_id arrives via state, not the URL path, on this leg.
 func (h *Handler) handleNotionOAuthCallback(w http.ResponseWriter, r *http.Request) {
@@ -396,12 +457,14 @@ func (h *Handler) handleNotionOAuthCallback(w http.ResponseWriter, r *http.Reque
 		http.Error(w, "invalid oauth state", http.StatusBadRequest)
 		return
 	}
-	if _, ok, err := auth.VerifyChatMembership(r.Context(), h.telegramBot, h.repo, chatID, userID, false); err != nil {
-		http.Error(w, "membership verification failed", http.StatusInternalServerError)
-		return
-	} else if !ok {
-		http.Error(w, "not a member of this chat", http.StatusForbidden)
-		return
+	if !h.devAuthBypass {
+		if ok, err := auth.VerifyChatMembership(r.Context(), h.repo, chatID, userID); err != nil {
+			http.Error(w, "membership verification failed", http.StatusInternalServerError)
+			return
+		} else if !ok {
+			http.Error(w, "not authorized for this chat", http.StatusForbidden)
+			return
+		}
 	}
 
 	token, err := notion.ExchangeCodeForToken(r.Context(), h.httpClient, h.notionOAuth, code)

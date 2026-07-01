@@ -46,6 +46,9 @@ func (f *fakeActionItemRepo) ListSummaries(ctx context.Context, chatID int64, li
 func (f *fakeActionItemRepo) ListMessagesByTagSince(ctx context.Context, chatID int64, aiTag string, since time.Time) ([]model.Message, error) {
 	return nil, nil
 }
+func (f *fakeActionItemRepo) ListMessagesByTag(ctx context.Context, chatID int64, aiTag string, beforeID int64, limit int) ([]model.Message, error) {
+	return nil, nil
+}
 func (f *fakeActionItemRepo) ListActiveChatsForSchedule(ctx context.Context, hour int, minute int) ([]int64, error) {
 	return nil, nil
 }
