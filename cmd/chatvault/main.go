@@ -53,7 +53,7 @@ func main() {
 	services := service.NewServices(ctx, repo, geminiClient, transcriberClient, storageClient, notionClient, notionCipher, cfg.GeminiEmbeddingModel, cfg.DailySummaryHourUTC, cfg.DailySummaryMinuteUTC)
 	defer services.Close()
 
-	handler := bothandler.NewHandler(services, cfg.TelegramBotToken, cfg.DashboardBaseURL)
+	handler := bothandler.NewHandler(services, repo, cfg.TelegramBotToken, cfg.DashboardBaseURL)
 	telegramBot, err := telegrambot.New(cfg.TelegramBotToken, telegrambot.WithDefaultHandler(handler.DefaultHandler))
 	if err != nil {
 		log.Fatalf("telegram bot init failed: %v", err)

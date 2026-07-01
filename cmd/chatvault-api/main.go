@@ -7,8 +7,6 @@ import (
 	"os/signal"
 	"syscall"
 
-	telegrambot "github.com/go-telegram/bot"
-
 	"chatvault/internal/ai"
 	"chatvault/internal/api"
 	"chatvault/internal/config"
@@ -65,15 +63,6 @@ func main() {
 	defer services.Close()
 	log.Println("Services initialized")
 
-	log.Println("Initializing Telegram bot client...")
-	// Constructed without Start(): used only for synchronous Bot API calls
-	// (getChatMember), never for long-polling updates.
-	telegramBot, err := telegrambot.New(cfg.TelegramBotToken)
-	if err != nil {
-		log.Fatalf("telegram bot client init failed: %v", err)
-	}
-	log.Println("Telegram bot client initialized")
-
 	notionOAuthCfg := notion.OAuthConfig{
 		ClientID:     cfg.NotionOAuthClientID,
 		ClientSecret: cfg.NotionOAuthClientSecret,
@@ -81,8 +70,14 @@ func main() {
 	}
 
 	log.Println("Creating API handler and router...")
-	handler := api.NewHandler(services, repo, telegramBot, cfg.TelegramBotToken, notionOAuthCfg, cfg.SessionSecret, cfg.DashboardBaseURL, cfg.HTTPTimeout)
-	router := api.NewRouter(handler, telegramBot, repo, cfg.AllowedOrigins)
+	if cfg.DevAuthBypass {
+		if cfg.Environment != "development" {
+			log.Fatalf("refusing to start: DEV_AUTH_BYPASS is enabled but APP_ENV is %q, not \"development\". DEV_AUTH_BYPASS disables all Telegram login verification and chat access checks -- it only runs when APP_ENV=development is also set explicitly, which a real deployment won't have.", cfg.Environment)
+		}
+		log.Println("WARN: DEV_AUTH_BYPASS is enabled — Telegram login verification is disabled. Never use this in production.")
+	}
+	handler := api.NewHandler(services, repo, cfg.TelegramBotToken, notionOAuthCfg, cfg.SessionSecret, cfg.DashboardBaseURL, cfg.HTTPTimeout, cfg.DevAuthBypass)
+	router := api.NewRouter(handler, repo, cfg.AllowedOrigins, cfg.DevAuthBypass)
 	server := api.NewServer(cfg.APIPort, router)
 	log.Println("API server created, starting...")
 

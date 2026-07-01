@@ -40,6 +40,15 @@ type Config struct {
 	NotionOAuthClientSecret string
 	NotionOAuthRedirectURL  string
 	NotionEncryptionKey     string
+	// DevAuthBypass disables Telegram login signature and timestamp verification.
+	// Must never be set in production.
+	DevAuthBypass bool
+	// Environment is "production" unless APP_ENV is explicitly set otherwise.
+	// Defaulting to "production" (rather than defaulting to "development")
+	// means a deployment that simply forgets to set APP_ENV is safe by
+	// construction: DevAuthBypass refuses to run unless this is explicitly
+	// "development", which requires deliberately setting APP_ENV locally.
+	Environment string
 }
 
 // Load builds Config from environment variables and applies defaults.
@@ -76,6 +85,8 @@ func Load() (Config, error) {
 		NotionOAuthClientSecret:   os.Getenv("NOTION_OAUTH_CLIENT_SECRET"),
 		NotionOAuthRedirectURL:    os.Getenv("NOTION_OAUTH_REDIRECT_URL"),
 		NotionEncryptionKey:       os.Getenv("NOTION_ENCRYPTION_KEY"),
+		DevAuthBypass:             os.Getenv("DEV_AUTH_BYPASS") == "true",
+		Environment:               getEnv("APP_ENV", "production"),
 	}
 
 	if cfg.TelegramBotToken == "" {

@@ -3,8 +3,25 @@ package api
 import (
 	"log"
 	"net/http"
+	"runtime/debug"
 	"time"
 )
+
+// Recover catches panics in downstream handlers, logs the stack trace, and
+// returns a clean 500 instead of letting the connection drop -- which a
+// reverse proxy (e.g. the Vite dev server) would otherwise surface as an
+// opaque 502 with no server-side detail.
+func Recover(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if rec := recover(); rec != nil {
+				log.Printf("ERROR: panic recovered: method=%s path=%s err=%v\n%s", r.Method, r.URL.Path, rec, debug.Stack())
+				http.Error(w, "internal server error", http.StatusInternalServerError)
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
+}
 
 // CORS returns middleware that allows only the configured dashboard
 // origin(s) to call the API with credentials (cookies), since the dashboard

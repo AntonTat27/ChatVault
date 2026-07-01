@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -17,6 +18,7 @@ import (
 
 	"chatvault/internal/model"
 	"chatvault/internal/service"
+	"chatvault/internal/storage"
 )
 
 const (
@@ -46,6 +48,7 @@ var (
 // Handler wires Telegram update handling with ChatVault services.
 type Handler struct {
 	services         *service.Services
+	repo             *storage.Repository
 	httpClient       *http.Client
 	telegramToken    string
 	dashboardBaseURL string
@@ -53,10 +56,13 @@ type Handler struct {
 
 // NewHandler creates a message handler instance. dashboardBaseURL may be
 // empty (e.g. when the dashboard API isn't deployed yet); /dashboard then
-// replies with a setup note instead of a broken link.
-func NewHandler(services *service.Services, telegramToken string, dashboardBaseURL string) *Handler {
+// replies with a setup note instead of a broken link. repo is used directly
+// (bypassing services) to grant dashboard access: once when the bot is added
+// to a chat (owner), and once per caller of /dashboard (self-service).
+func NewHandler(services *service.Services, repo *storage.Repository, telegramToken string, dashboardBaseURL string) *Handler {
 	return &Handler{
 		services:         services,
+		repo:             repo,
 		httpClient:       &http.Client{Timeout: reqTimeoutSeconds * time.Second},
 		telegramToken:    telegramToken,
 		dashboardBaseURL: dashboardBaseURL,
@@ -81,6 +87,10 @@ func (h *Handler) RegisterHandlers(b *bot.Bot) {
 
 // DefaultHandler stores every incoming message and triggers async processing.
 func (h *Handler) DefaultHandler(ctx context.Context, b *bot.Bot, update *models.Update) {
+	if update.MyChatMember != nil {
+		h.handleMyChatMember(ctx, update.MyChatMember)
+		return
+	}
 	if update.Message == nil {
 		return
 	}
@@ -154,6 +164,53 @@ func (h *Handler) DefaultHandler(ctx context.Context, b *bot.Bot, update *models
 		h.replyText(ctx, b, update, processingVoiceMessage)
 		voiceFileID := update.Message.Voice.FileID
 		go h.processVoice(context.WithoutCancel(ctx), b, update, entry, voiceFileID)
+	}
+}
+
+// handleMyChatMember grants dashboard ownership to whoever added the bot to
+// a chat. The Bot API has no way to enumerate a group's existing membership,
+// so this is the only automatic grant: my_chat_member's From field is the
+// user who performed the action, captured the moment the bot's own status
+// flips from not-present to member/administrator.
+func (h *Handler) handleMyChatMember(ctx context.Context, update *models.ChatMemberUpdated) {
+	if isPresentStatus(update.OldChatMember.Type) || !isPresentStatus(update.NewChatMember.Type) {
+		return
+	}
+	if err := h.services.EnsureChat(ctx, update.Chat.ID, update.Chat.Title); err != nil {
+		log.Printf("ERROR: failed to record chat %d on bot add: %v", update.Chat.ID, err)
+		return
+	}
+	h.grantDashboardAccess(ctx, update.Chat.ID, update.From, "owner")
+}
+
+// isPresentStatus reports whether a ChatMember status means "currently in
+// the chat" (as opposed to left/banned/never joined).
+func isPresentStatus(t models.ChatMemberType) bool {
+	switch t {
+	case models.ChatMemberTypeMember, models.ChatMemberTypeAdministrator, models.ChatMemberTypeOwner, models.ChatMemberTypeRestricted:
+		return true
+	default:
+		return false
+	}
+}
+
+// grantDashboardAccess records a Telegram user as authorized to view a
+// chat's dashboard. Access is permanent once granted; there is no
+// revocation. Best-effort: errors are logged, not surfaced to the chat, so a
+// transient failure here doesn't block the reply the caller is also sending.
+func (h *Handler) grantDashboardAccess(ctx context.Context, chatID int64, user models.User, role string) {
+	dashboardUser := model.DashboardUser{
+		TelegramUserID: user.ID,
+		FirstName:      user.FirstName,
+		LastName:       user.LastName,
+		Username:       user.Username,
+	}
+	if err := h.repo.UpsertDashboardUser(ctx, dashboardUser); err != nil {
+		log.Printf("ERROR: failed to upsert dashboard user %d: %v", user.ID, err)
+		return
+	}
+	if err := h.repo.GrantChatAccess(ctx, chatID, user.ID, role); err != nil {
+		log.Printf("ERROR: failed to grant chat %d access to user %d: %v", chatID, user.ID, err)
 	}
 }
 
@@ -266,9 +323,11 @@ func (h *Handler) handleNotion(ctx context.Context, b *bot.Bot, update *models.U
 	h.replyText(ctx, b, update, "Notion integration connected. Note: this method is deprecated -- run /notion with no arguments to connect via the dashboard instead.")
 }
 
-// handleDashboard replies with a deep link to this chat's web dashboard,
-// which is how a Telegram user discovers their chat_id for the dashboard's
-// login flow without it being able to enumerate a user's chats itself.
+// handleDashboard grants the calling user dashboard access to this chat
+// (self-service; anyone who runs the command gets access, same as the owner
+// captured automatically when the bot was added) and replies with a deep
+// link to the chat's web dashboard, which also carries the chat_id the
+// dashboard's login flow needs.
 func (h *Handler) handleDashboard(ctx context.Context, b *bot.Bot, update *models.Update) {
 	if update.Message == nil {
 		return
@@ -276,6 +335,9 @@ func (h *Handler) handleDashboard(ctx context.Context, b *bot.Bot, update *model
 	if h.dashboardBaseURL == "" {
 		h.replyText(ctx, b, update, "The web dashboard isn't set up yet.")
 		return
+	}
+	if update.Message.From != nil {
+		h.grantDashboardAccess(ctx, update.Message.Chat.ID, *update.Message.From, "member")
 	}
 	link := fmt.Sprintf("%s/login?chat_id=%d", strings.TrimRight(h.dashboardBaseURL, "/"), update.Message.Chat.ID)
 	h.replyText(ctx, b, update, "Open this chat's dashboard: "+link)
