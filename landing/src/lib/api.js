@@ -49,6 +49,12 @@ export function updateActionItemStatus(id, status) {
   })
 }
 
+export function listMessagesByTag(chatId, tag, beforeId = 0) {
+  const params = new URLSearchParams({ tag })
+  if (beforeId > 0) params.set('before_id', String(beforeId))
+  return request(`${API_BASE_URL}/chats/${chatId}/messages?${params.toString()}`)
+}
+
 export function searchMessages(chatId, query, mode = '') {
   const params = new URLSearchParams({ q: query, ...(mode ? { mode } : {}) })
   return request(`${API_BASE_URL}/chats/${chatId}/search?${params.toString()}`)
