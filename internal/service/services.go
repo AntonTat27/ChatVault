@@ -270,13 +270,13 @@ func (s *Services) ListTaggedMessages(ctx context.Context, chatID int64, tag str
 
 const taggedMessagePageSize = 20
 
-// ListMessages returns paginated messages for a chat, suitable for dashboard
-// list pages. If tag is empty, all non-noise messages are returned (for the
-// timeline). If tag is non-empty, only messages with that tag are returned.
-// beforeID is a cursor: pass 0 to start from the newest, or the smallest id
-// from the previous page to load older messages.
-func (s *Services) ListMessages(ctx context.Context, chatID int64, tag string, beforeID int64) ([]model.Message, error) {
-	return s.repo.ListMessagesByTag(ctx, chatID, tag, beforeID, taggedMessagePageSize)
+// ListMessages returns paginated messages for a chat. If tag is empty, all
+// non-noise messages are returned (for the timeline). If tag is non-empty,
+// only messages with that tag are returned. beforeID is a cursor (0 = newest).
+// limit controls page size; callers should pass 50 for the timeline and 20
+// for tag-filtered list pages.
+func (s *Services) ListMessages(ctx context.Context, chatID int64, tag string, beforeID int64, limit int) ([]model.Message, error) {
+	return s.repo.ListMessagesByTag(ctx, chatID, tag, beforeID, limit)
 }
 
 // SearchMessages searches for messages matching a query using full-text search.

@@ -347,7 +347,12 @@ func (h *Handler) handleListMessages(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	messages, err := h.services.ListMessages(r.Context(), chatID, tag, beforeID)
+	// Timeline (no tag) loads 50 per page; tag-filtered list pages load 20.
+	limit := 20
+	if tag == "" {
+		limit = 50
+	}
+	messages, err := h.services.ListMessages(r.Context(), chatID, tag, beforeID, limit)
 	if err != nil {
 		http.Error(w, "failed to list messages", http.StatusInternalServerError)
 		return

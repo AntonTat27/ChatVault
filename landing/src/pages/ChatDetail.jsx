@@ -42,6 +42,7 @@ export default function ChatDetail() {
             { label: 'Decisions', to: `/dashboard/chats/${chatId}/decisions`, color: 'border-blue-500/30 text-blue-300 hover:bg-blue-500/10' },
             { label: 'Actions', to: `/dashboard/chats/${chatId}/actions`, color: 'border-orange-500/30 text-orange-300 hover:bg-orange-500/10' },
             { label: 'Ideas', to: `/dashboard/chats/${chatId}/ideas`, color: 'border-green-500/30 text-green-300 hover:bg-green-500/10' },
+            { label: 'Timeline', to: `/dashboard/chats/${chatId}/timeline`, color: 'border-violet-500/30 text-violet-300 hover:bg-violet-500/10' },
             { label: 'Notion integration', to: `/dashboard/chats/${chatId}/integrations`, color: 'border-white/10 text-gray-400 hover:text-white hover:bg-white/5' },
           ].map(({ label, to, color }) => (
             <Link

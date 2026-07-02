@@ -49,6 +49,12 @@ export function updateActionItemStatus(id, status) {
   })
 }
 
+// listMessages fetches all non-noise messages for the timeline (no tag filter).
+export function listMessages(chatId, beforeId = 0) {
+  const qs = beforeId > 0 ? `?before_id=${beforeId}` : ''
+  return request(`${API_BASE_URL}/chats/${chatId}/messages${qs}`)
+}
+
 export function listMessagesByTag(chatId, tag, beforeId = 0) {
   const params = new URLSearchParams({ tag })
   if (beforeId > 0) params.set('before_id', String(beforeId))

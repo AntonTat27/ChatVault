@@ -9,6 +9,7 @@ import Home from './pages/Home'
 import Ideas from './pages/Ideas'
 import Integrations from './pages/Integrations'
 import Login from './pages/Login'
+import Timeline from './pages/Timeline'
 
 function App() {
   const navigate = useNavigate()
@@ -31,6 +32,7 @@ function App() {
       <Route path="/dashboard/chats/:chatId/decisions" element={<Decisions />} />
       <Route path="/dashboard/chats/:chatId/actions" element={<Actions />} />
       <Route path="/dashboard/chats/:chatId/ideas" element={<Ideas />} />
+      <Route path="/dashboard/chats/:chatId/timeline" element={<Timeline />} />
     </Routes>
   )
 }
