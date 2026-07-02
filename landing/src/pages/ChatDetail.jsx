@@ -36,9 +36,24 @@ export default function ChatDetail() {
   return (
     <div className="min-h-screen bg-[#15131f] px-6 py-12 text-white">
       <div className="mx-auto max-w-3xl space-y-10">
-        <Link to={`/dashboard/chats/${chatId}/integrations`} className="text-sm text-violet-300 hover:underline">
-          Notion integration →
-        </Link>
+        {/* Quick-nav row */}
+        <nav className="flex flex-wrap gap-2">
+          {[
+            { label: 'Decisions', to: `/dashboard/chats/${chatId}/decisions`, color: 'border-blue-500/30 text-blue-300 hover:bg-blue-500/10' },
+            { label: 'Actions', to: `/dashboard/chats/${chatId}/actions`, color: 'border-orange-500/30 text-orange-300 hover:bg-orange-500/10' },
+            { label: 'Ideas', to: `/dashboard/chats/${chatId}/ideas`, color: 'border-green-500/30 text-green-300 hover:bg-green-500/10' },
+            { label: 'Notion integration', to: `/dashboard/chats/${chatId}/integrations`, color: 'border-white/10 text-gray-400 hover:text-white hover:bg-white/5' },
+          ].map(({ label, to, color }) => (
+            <Link
+              key={to}
+              to={to}
+              className={`rounded-lg border px-4 py-2 text-sm font-medium transition-colors ${color}`}
+            >
+              {label} →
+            </Link>
+          ))}
+        </nav>
+
         {error && <p className="text-red-400">{error}</p>}
 
         <section>
